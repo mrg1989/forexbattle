@@ -134,9 +134,14 @@ double CalcLotSize(double entry, double sl)
    double slPoints    = MathAbs(entry - sl);
    if (slPoints == 0) return 0;
 
+   SymbolSelect(Symbol(), true);   // ensure symbol data is loaded
    double tickValue   = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
    double tickSize    = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-   if (tickValue == 0 || tickSize == 0) return 0;
+   if (tickValue == 0 || tickSize == 0)
+   {
+      Print("[Crossfire EA] Symbol info unavailable — tickValue=", tickValue, " tickSize=", tickSize);
+      return 0;
+   }
 
    double pipValue    = tickValue / tickSize * slPoints;
    double lots        = riskAmount / pipValue;

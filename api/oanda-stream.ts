@@ -3,21 +3,18 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 const STREAM_BASE = 'https://stream-fxpractice.oanda.com/v3'
 const OANDA_TOKEN = process.env.OANDA_TOKEN ?? ''
 
-// Catch-all: handles /api/oanda-stream/accounts/.../pricing/stream?instruments=...
+// Called via rewrite: /api/oanda-stream/accounts/.../pricing/stream?instruments=...
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const segments = Array.isArray(req.query.path)
-    ? req.query.path
-    : [req.query.path ?? '']
-  const oandaPath = '/' + segments.join('/')
+  const { _path = '', ...rest } = req.query as Record<string, string | string[]>
+  const oandaPath = '/' + (Array.isArray(_path) ? _path.join('/') : _path)
 
-  const { path: _p, ...qp } = req.query as Record<string, string | string[]>
   const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(qp)) {
+  for (const [k, v] of Object.entries(rest)) {
     if (Array.isArray(v)) v.forEach(x => qs.append(k, x))
     else qs.append(k, v)
   }
-  const queryString = qs.toString() ? '?' + qs.toString() : ''
-  const url = `${STREAM_BASE}${oandaPath}${queryString}`
+
+  const url = `${STREAM_BASE}${oandaPath}${qs.toString() ? '?' + qs.toString() : ''}`
 
   const upstream = await fetch(url, {
     headers: { Authorization: `Bearer ${OANDA_TOKEN}` },

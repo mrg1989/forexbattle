@@ -1,12 +1,14 @@
 {
   "rewrites": [
-    { "source": "/api/ai/:path*", "destination": "/api/ai" }
+    { "source": "/api/oanda-stream/:path*", "destination": "/api/oanda-stream?_path=:path*" },
+    { "source": "/api/oanda/:path*",        "destination": "/api/oanda?_path=:path*"        },
+    { "source": "/api/ai/:path*",           "destination": "/api/ai"                        }
   ],
   "functions": {
-    "api/oanda-stream/[...path].ts": { "maxDuration": 300 },
-    "api/ai.ts":                     { "maxDuration": 60  },
-    "api/oanda/[...path].ts":        { "maxDuration": 30  },
-    "api/signal.ts":                 { "maxDuration": 10  },
-    "api/rates.ts":                  { "maxDuration": 10  }
+    "api/oanda-stream.ts": { "maxDuration": 300 },
+    "api/ai.ts":           { "maxDuration": 60  },
+    "api/oanda.ts":        { "maxDuration": 30  },
+    "api/signal.ts":       { "maxDuration": 10  },
+    "api/rates.ts":        { "maxDuration": 10  }
   }
 }

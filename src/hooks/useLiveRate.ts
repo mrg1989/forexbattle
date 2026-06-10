@@ -15,7 +15,7 @@ export function useLiveRate(pair: string) {
     const [base, quote] = parts
 
     const load = () => {
-      fetch(`https://api.frankfurter.app/latest?from=${base}&to=${quote}`)
+      fetch(`/api/rates?from=${base}&to=${quote}`)
         .then(r => { if (!r.ok) throw new Error('bad response'); return r.json() })
         .then(d => {
           const p = d?.rates?.[quote]

@@ -2,12 +2,14 @@
   "rewrites": [
     { "source": "/api/ai/(.*)",  "destination": "/api/ai"      },
     { "source": "/api/signal",   "destination": "/api/signal"  },
+    { "source": "/api/rates",    "destination": "/api/rates"   },
     { "source": "/(.*)",         "destination": "/index.html"  }
   ],
   "functions": {
     "api/oanda-stream/[...path].ts": { "maxDuration": 300 },
     "api/ai.ts":                     { "maxDuration": 60  },
     "api/oanda/[...path].ts":        { "maxDuration": 30  },
-    "api/signal.ts":                 { "maxDuration": 10  }
+    "api/signal.ts":                 { "maxDuration": 10  },
+    "api/rates.ts":                  { "maxDuration": 10  }
   }
 }

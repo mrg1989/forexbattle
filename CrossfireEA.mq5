@@ -20,7 +20,7 @@
 #property strict
 
 //--- Input parameters
-input string   SignalURL    = "https://crossfire-your-app.vercel.app/api/signal";
+input string   SignalURL    = "https://forexbattle.vercel.app/api/signal";
 input string   SignalKey    = "";          // Set to your SIGNAL_KEY env var value
 input double   RiskPercent  = 1.0;        // % of account balance to risk per trade
 input int      PollSeconds  = 10;         // How often to check for a new signal

@@ -21,9 +21,10 @@ function readEnvLocal(): Record<string, string> {
 }
 
 const env = readEnvLocal()
-const oandaToken    = env.OANDA_TOKEN      ?? ''
-const oandaAccount  = env.OANDA_ACCOUNT    ?? ''
-const anthropicKey  = env.ANTHROPIC_API_KEY ?? ''
+// Fall back to process.env so Vercel build picks up dashboard environment variables
+const oandaToken    = env.OANDA_TOKEN       ?? process.env.OANDA_TOKEN       ?? ''
+const oandaAccount  = env.OANDA_ACCOUNT     ?? process.env.OANDA_ACCOUNT     ?? ''
+const anthropicKey  = env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? ''
 const isConfigured  = Boolean(oandaToken && oandaAccount)
 const isAiConfigured = Boolean(anthropicKey)
 

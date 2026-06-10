@@ -128,12 +128,17 @@ void PollAndTrade()
 //+------------------------------------------------------------------+
 double CalcLotSize(double slPips)
 {
+   SymbolSelect(Symbol(), true);   // ensure symbol data is loaded
    double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskAmount  = balance * RiskPercent / 100.0;
-   double slPoints    = slPips * 0.0001;   // convert pips to price distance (5-digit broker)
-   if (slPoints == 0) return 0;
 
-   SymbolSelect(Symbol(), true);   // ensure symbol data is loaded
+   // Use SYMBOL_POINT to handle both 3-digit (JPY) and 5-digit brokers
+   double point   = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   int    digits  = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   double pipSize = point * ((digits == 3 || digits == 5) ? 10 : 1);
+   double slDist  = slPips * pipSize;
+   if (slDist == 0) return 0;
+
    double tickValue   = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
    double tickSize    = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
    if (tickValue == 0 || tickSize == 0)
@@ -142,7 +147,7 @@ double CalcLotSize(double slPips)
       return 0;
    }
 
-   double pipValue    = tickValue / tickSize * slPoints;
+   double pipValue    = tickValue / tickSize * slDist;
    double lots        = riskAmount / pipValue;
 
    // Round to broker's step
@@ -160,10 +165,13 @@ bool PlaceTrade(ENUM_ORDER_TYPE type, double slPips, double tpPips, double lots)
    MqlTradeRequest req = {};
    MqlTradeResult  res = {};
 
-   double pipSize  = 0.0001;   // 5-digit broker pip
+   double point     = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   int    digits    = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   double pipSize   = point * ((digits == 3 || digits == 5) ? 10 : 1);
    double fillPrice = (type == ORDER_TYPE_BUY)
                       ? SymbolInfoDouble(Symbol(), SYMBOL_ASK)
                       : SymbolInfoDouble(Symbol(), SYMBOL_BID);
+
    double sl, tp;
    if (type == ORDER_TYPE_BUY)
    {
@@ -175,21 +183,45 @@ bool PlaceTrade(ENUM_ORDER_TYPE type, double slPips, double tpPips, double lots)
       sl = fillPrice + slPips * pipSize;
       tp = fillPrice - tpPips * pipSize;
    }
-   // Normalise to broker's digit count
-   int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+
+   // Enforce broker's minimum stop distance
+   int    stopsLevel = (int)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist    = stopsLevel * point + point;  // +1 point buffer
+   if (type == ORDER_TYPE_BUY)
+   {
+      if ((fillPrice - sl) < minDist) sl = fillPrice - minDist;
+      if ((tp - fillPrice) < minDist) tp = fillPrice + minDist;
+   }
+   else
+   {
+      if ((sl - fillPrice) < minDist) sl = fillPrice + minDist;
+      if ((fillPrice - tp) < minDist) tp = fillPrice - minDist;
+   }
    sl = NormalizeDouble(sl, digits);
    tp = NormalizeDouble(tp, digits);
 
-   req.action      = TRADE_ACTION_DEAL;
-   req.symbol      = Symbol();
-   req.volume      = lots;
-   req.type        = type;
-   req.price       = fillPrice;
-   req.sl          = sl;
-   req.tp          = tp;
-   req.magic       = MagicNumber;
-   req.comment     = "Crossfire";
-   req.type_filling = ORDER_FILLING_IOC;
+   // Auto-detect filling mode supported by this symbol
+   int fillFlags = (int)SymbolInfoInteger(Symbol(), SYMBOL_FILLING_MODE);
+   ENUM_ORDER_TYPE_FILLING filling;
+   if      ((fillFlags & SYMBOL_FILLING_FOK) != 0) filling = ORDER_FILLING_FOK;
+   else if ((fillFlags & SYMBOL_FILLING_IOC) != 0) filling = ORDER_FILLING_IOC;
+   else                                             filling = ORDER_FILLING_RETURN;
+
+   Print("[Crossfire EA] ", EnumToString(type),
+         " price=", fillPrice, " sl=", sl, " tp=", tp,
+         " lots=", lots, " filling=", EnumToString(filling),
+         " stopsLevel=", stopsLevel);
+
+   req.action       = TRADE_ACTION_DEAL;
+   req.symbol       = Symbol();
+   req.volume       = lots;
+   req.type         = type;
+   req.price        = fillPrice;
+   req.sl           = sl;
+   req.tp           = tp;
+   req.magic        = MagicNumber;
+   req.comment      = "Crossfire";
+   req.type_filling = filling;
 
    bool ok = OrderSend(req, res);
    if (!ok || res.retcode != TRADE_RETCODE_DONE)

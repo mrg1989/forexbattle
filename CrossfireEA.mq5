@@ -53,14 +53,15 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void PollAndTrade()
 {
-   char   result[];
+   uchar  result[];
+   uchar  data[];   // empty array for GET request
    string headers = "Content-Type: application/json\r\n";
    if (StringLen(SignalKey) > 0)
       headers += "X-Signal-Key: " + SignalKey + "\r\n";
 
    string resHeaders;
    int    timeout   = 5000;  // 5 second HTTP timeout
-   int    httpCode  = WebRequest("GET", SignalURL, headers, timeout, NULL, result, resHeaders);
+   int    httpCode  = WebRequest("GET", SignalURL, headers, timeout, data, result, resHeaders);
 
    if (httpCode != 200)
    {

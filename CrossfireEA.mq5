@@ -79,9 +79,8 @@ void PollAndTrade()
    // Extract signal fields with simple string parsing
    string direction = ExtractField(body, "\"direction\":\"", "\"");
    string pair      = ExtractField(body, "\"pair\":\"",      "\"");
-   double entry     = StringToDouble(ExtractField(body, "\"entry\":",  ","));
-   double sl        = StringToDouble(ExtractField(body, "\"sl\":",     ","));
-   double tp        = StringToDouble(ExtractField(body, "\"tp\":",     ","));
+   double slPips    = StringToDouble(ExtractField(body, "\"slPips\":",  ","));
+   double tpPips    = StringToDouble(ExtractField(body, "\"tpPips\":",  ","));
    string idStr     = ExtractField(body, "\"id\":",          ",");
    int    signalId  = (int)StringToInteger(idStr);
 
@@ -93,7 +92,7 @@ void PollAndTrade()
    }
 
    // Validate fields
-   if (StringLen(direction) == 0 || entry == 0 || sl == 0 || tp == 0)
+   if (StringLen(direction) == 0 || slPips <= 0 || tpPips <= 0)
    {
       Print("[Crossfire EA] Invalid signal fields, ignoring. Body: ", body);
       return;
@@ -106,32 +105,32 @@ void PollAndTrade()
       return;
    }
 
-   // Calculate lot size from risk %
-   double lotSize = CalcLotSize(entry, sl);
+   // Calculate lot size from risk % using slPips
+   double lotSize = CalcLotSize(slPips);
    if (lotSize <= 0)
    {
       Print("[Crossfire EA] Lot size calculation failed");
       return;
    }
 
-   // Place trade
+   // Place trade — SL/TP calculated from actual fill price using pip offsets
    ENUM_ORDER_TYPE orderType = (direction == "buy") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   bool            placed    = PlaceTrade(orderType, entry, sl, tp, lotSize);
+   bool            placed    = PlaceTrade(orderType, slPips, tpPips, lotSize);
 
    if (placed)
    {
       g_signalId = signalId;
-      Print("[Crossfire EA] Trade placed — ", direction, " | Entry: ", entry,
-            " | SL: ", sl, " | TP: ", tp, " | Lots: ", lotSize);
+      Print("[Crossfire EA] Trade placed — ", direction,
+            " | SL: ", slPips, "p | TP: ", tpPips, "p | Lots: ", lotSize);
    }
 }
 
 //+------------------------------------------------------------------+
-double CalcLotSize(double entry, double sl)
+double CalcLotSize(double slPips)
 {
    double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskAmount  = balance * RiskPercent / 100.0;
-   double slPoints    = MathAbs(entry - sl);
+   double slPoints    = slPips * 0.0001;   // convert pips to price distance (5-digit broker)
    if (slPoints == 0) return 0;
 
    SymbolSelect(Symbol(), true);   // ensure symbol data is loaded
@@ -156,18 +155,36 @@ double CalcLotSize(double entry, double sl)
 }
 
 //+------------------------------------------------------------------+
-bool PlaceTrade(ENUM_ORDER_TYPE type, double entry, double sl, double tp, double lots)
+bool PlaceTrade(ENUM_ORDER_TYPE type, double slPips, double tpPips, double lots)
 {
    MqlTradeRequest req = {};
    MqlTradeResult  res = {};
+
+   double pipSize  = 0.0001;   // 5-digit broker pip
+   double fillPrice = (type == ORDER_TYPE_BUY)
+                      ? SymbolInfoDouble(Symbol(), SYMBOL_ASK)
+                      : SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   double sl, tp;
+   if (type == ORDER_TYPE_BUY)
+   {
+      sl = fillPrice - slPips * pipSize;
+      tp = fillPrice + tpPips * pipSize;
+   }
+   else
+   {
+      sl = fillPrice + slPips * pipSize;
+      tp = fillPrice - tpPips * pipSize;
+   }
+   // Normalise to broker's digit count
+   int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   sl = NormalizeDouble(sl, digits);
+   tp = NormalizeDouble(tp, digits);
 
    req.action      = TRADE_ACTION_DEAL;
    req.symbol      = Symbol();
    req.volume      = lots;
    req.type        = type;
-   req.price       = (type == ORDER_TYPE_BUY)
-                     ? SymbolInfoDouble(Symbol(), SYMBOL_ASK)
-                     : SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   req.price       = fillPrice;
    req.sl          = sl;
    req.tp          = tp;
    req.magic       = MagicNumber;

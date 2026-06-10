@@ -1,0 +1,15 @@
+{
+  "rewrites": [
+    { "source": "/api/oanda-stream/(.*)", "destination": "/api/oanda-stream" },
+    { "source": "/api/oanda/(.*)",        "destination": "/api/oanda"         },
+    { "source": "/api/ai/(.*)",           "destination": "/api/ai"            },
+    { "source": "/api/signal",            "destination": "/api/signal"        },
+    { "source": "/(.*)",                  "destination": "/index.html"        }
+  ],
+  "functions": {
+    "api/oanda-stream.ts": { "maxDuration": 300 },
+    "api/ai.ts":           { "maxDuration": 60  },
+    "api/oanda.ts":        { "maxDuration": 30  },
+    "api/signal.ts":       { "maxDuration": 10  }
+  }
+}

@@ -117,7 +117,28 @@ export default function AiAnalysisPanel({
   const [aiLoading,  setAiLoading]  = useState(false)
   const [aiError,    setAiError]    = useState<string | null>(null)
   const [copied,     setCopied]     = useState(false)
+  const [startBalance, setStartBalance] = useState(100000)
+  const [riskPct,      setRiskPct]      = useState(1.0)
   const textRef = useRef<HTMLDivElement>(null)
+
+  // ── Equity curve ────────────────────────────────────────────────────────────
+  const equityCurve = useMemo(() => {
+    const closed = trades.filter(t => t.result === 'win' || t.result === 'loss')
+    let balance = startBalance
+    let peak    = startBalance
+    let maxDd   = 0
+    const rows = closed.map((t, i) => {
+      const prev    = balance
+      if (t.result === 'win')  balance = balance * (1 + (riskPct / 100) * rrRatio)
+      else                     balance = balance * (1 - riskPct / 100)
+      peak  = Math.max(peak, balance)
+      const dd = (peak - balance) / peak * 100
+      if (dd > maxDd) maxDd = dd
+      return { n: i + 1, date: t.sessionDate, dir: t.direction, result: t.result, balance, dd, pnlAmt: balance - prev }
+    })
+    const totalReturn = startBalance > 0 ? (balance - startBalance) / startBalance * 100 : 0
+    return { rows, finalBalance: balance, totalReturn, maxDd }
+  }, [trades, startBalance, riskPct, rrRatio])
 
   // Auto-scroll AI response
   useEffect(() => {
@@ -312,9 +333,47 @@ export default function AiAnalysisPanel({
         {/* ── Right: AI response ── */}
         <div className="flex flex-col gap-0" style={{ width: '45%', minWidth: 0 }}>
 
+          {/* Equity config row */}
+          <div
+            className="flex-shrink-0 flex items-center gap-3 px-4 py-2 flex-wrap"
+            style={{ background: 'rgba(8,8,28,0.9)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
+          >
+            <span className="text-[9px] font-black uppercase tracking-widest" style={{ color: 'rgba(241,241,255,0.4)' }}>Equity Curve</span>
+            <div className="flex items-center gap-1">
+              <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>Start £</span>
+              <input
+                type="number" value={startBalance}
+                onChange={e => setStartBalance(Number(e.target.value))}
+                className="w-20 px-1.5 py-0.5 rounded text-[10px] tabular-nums text-right"
+                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(241,241,255,0.8)', outline: 'none' }}
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>Risk %</span>
+              <input
+                type="number" value={riskPct} step={0.1} min={0.1} max={10}
+                onChange={e => setRiskPct(Number(e.target.value))}
+                className="w-12 px-1.5 py-0.5 rounded text-[10px] tabular-nums text-right"
+                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(241,241,255,0.8)', outline: 'none' }}
+              />
+            </div>
+            {equityCurve.rows.length > 0 && (
+              <>
+                <div className="w-px h-3" style={{ background: 'rgba(255,255,255,0.1)' }} />
+                <span className="text-[10px] font-bold tabular-nums" style={{ color: equityCurve.totalReturn >= 0 ? '#4ADE80' : '#F87171' }}>
+                  {equityCurve.totalReturn >= 0 ? '+' : ''}{equityCurve.totalReturn.toFixed(1)}%
+                </span>
+                <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>return</span>
+                <span className="text-[10px] font-bold tabular-nums" style={{ color: '#F87171' }}>-{equityCurve.maxDd.toFixed(1)}%</span>
+                <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>max DD</span>
+                <span className="text-[10px] font-bold tabular-nums" style={{ color: 'rgba(241,241,255,0.6)' }}>£{equityCurve.finalBalance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}</span>
+              </>
+            )}
+          </div>
+
           {/* AI header */}
           <div
-            className="flex-shrink-0 flex items-center gap-3 px-4 py-3"
+            className="flex-shrink-0 flex items-center gap-3 px-4 py-2"
             style={{ background: 'rgba(8,8,28,0.8)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
           >
             <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: '#A78BFA' }}>
@@ -369,19 +428,57 @@ export default function AiAnalysisPanel({
             )}
 
             {!aiText && !aiLoading && !aiError && (
-              <div className="flex flex-col items-center justify-center h-full gap-3" style={{ color: 'rgba(241,241,255,0.25)' }}>
-                <div className="text-4xl" style={{ filter: 'grayscale(0.5)' }}>✦</div>
-                <p className="text-[11px] text-center max-w-xs leading-relaxed">
-                  The statistical analysis on the left is computed locally from your trade data.
-                  Click <span style={{ color: '#A78BFA' }}>Ask AI</span> to get Claude's interpretation — it will identify the strongest patterns and suggest specific entry filters.
-                </p>
-                {!isConfigured && (
-                  <p className="text-[10px] text-center max-w-xs leading-relaxed px-3 py-2 rounded-lg"
-                     style={{ background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.15)', color: '#F59E0B' }}>
-                    Add <code style={{ fontFamily: 'monospace' }}>ANTHROPIC_API_KEY=sk-ant-…</code> to <code style={{ fontFamily: 'monospace' }}>.env.local</code> and restart the dev server to enable AI analysis.
-                  </p>
-                )}
-              </div>
+              equityCurve.rows.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full gap-2" style={{ color: 'rgba(241,241,255,0.25)' }}>
+                  <span className="text-2xl">📈</span>
+                  <span className="text-[11px]">No closed trades yet.</span>
+                </div>
+              ) : (
+                <table className="w-full text-[10px] border-collapse">
+                  <thead className="sticky top-0" style={{ background: 'rgba(8,8,28,0.97)' }}>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                      <th className="text-left py-1.5 pr-2 font-bold tabular-nums" style={{ color: 'rgba(241,241,255,0.3)', width: 24 }}>#</th>
+                      <th className="text-left py-1.5 pr-3 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>Date</th>
+                      <th className="text-center py-1.5 px-1 font-bold" style={{ color: 'rgba(241,241,255,0.3)', width: 28 }}>Dir</th>
+                      <th className="text-center py-1.5 px-1 font-bold" style={{ color: 'rgba(241,241,255,0.3)', width: 28 }}>R</th>
+                      <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>P&amp;L</th>
+                      <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>Balance</th>
+                      <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>DD%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {equityCurve.rows.map(row => (
+                      <tr key={row.n} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td className="py-1 pr-2 tabular-nums" style={{ color: 'rgba(241,241,255,0.25)' }}>{row.n}</td>
+                        <td className="py-1 pr-3" style={{ color: 'rgba(241,241,255,0.5)', whiteSpace: 'nowrap' }}>
+                          {new Date(row.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
+                        </td>
+                        <td className="py-1 px-1 text-center">
+                          <span className="px-1 rounded text-[9px] font-bold" style={{
+                            background: row.dir === 'buy' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+                            color: row.dir === 'buy' ? '#4ADE80' : '#F87171',
+                          }}>{row.dir === 'buy' ? 'B' : 'S'}</span>
+                        </td>
+                        <td className="py-1 px-1 text-center">
+                          <span className="px-1 rounded text-[9px] font-bold" style={{
+                            background: row.result === 'win' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+                            color: row.result === 'win' ? '#4ADE80' : '#F87171',
+                          }}>{row.result === 'win' ? 'W' : 'L'}</span>
+                        </td>
+                        <td className="py-1 pl-2 text-right tabular-nums font-bold" style={{ color: row.result === 'win' ? '#4ADE80' : '#F87171' }}>
+                          {row.pnlAmt >= 0 ? '+' : ''}£{row.pnlAmt.toLocaleString('en-GB', { maximumFractionDigits: 0 })}
+                        </td>
+                        <td className="py-1 pl-2 text-right tabular-nums" style={{ color: 'rgba(241,241,255,0.7)' }}>
+                          £{row.balance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}
+                        </td>
+                        <td className="py-1 pl-2 text-right tabular-nums" style={{ color: row.dd > 5 ? '#F87171' : row.dd > 0 ? '#F59E0B' : '#4ADE80' }}>
+                          {row.dd > 0 ? `-${row.dd.toFixed(1)}%` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
             )}
 
             {(aiText || aiLoading) && (

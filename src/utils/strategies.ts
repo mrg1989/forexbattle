@@ -2,15 +2,16 @@ import type { Candle } from '../types'
 
 export interface LineOverlay {
   x1Ms:         number   // start timestamp (ms)
-  y1:           number   // start price  (ignored when fullHeight or fillZone)
+  y1:           number   // start price  (ignored when fullHeight; used as box top/bottom when fillZone+priceBound)
   x2Ms:         number   // end timestamp (ms)
-  y2:           number   // end price     (ignored when fullHeight or fillZone)
+  y2:           number   // end price     (ignored when fullHeight; used as box top/bottom when fillZone+priceBound)
   color:        string
   lineWidth?:   number
   dashPattern?: number[]
   label?:       string
   fullHeight?:  boolean  // vertical line spanning full chart height
-  fillZone?:    boolean  // filled background rectangle x1→x2, full price height
+  fillZone?:    boolean  // filled background rectangle x1→x2
+  priceBound?:  boolean  // when true + fillZone: rect is bounded by y1 (top price) and y2 (bottom price)
   fillColor?:   string   // fill color when fillZone=true
   markerType?:  'buy' | 'sell'  // renders entry arrow at (x1Ms, y1)
   tradeResult?: 'win' | 'loss' | 'open'  // renders W/L chip next to arrow

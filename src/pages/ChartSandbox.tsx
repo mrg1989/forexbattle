@@ -6,6 +6,8 @@ import AiAnalysisPanel from '../components/AiAnalysisPanel'
 import { computeCrossfireWithLevels, computeCrossfireAll, runCrossfireBacktest, runCrossfireAiBacktest, evaluateLiveSignal } from '../utils/strategies'
 import type { BacktestStats, BacktestTrade, CrossfireAiSettings, LiveSignal } from '../utils/strategies'
 import { CROSSFIRE_AI_DEFAULTS } from '../utils/strategies'
+import { runSmcBacktest, SMC_DEFAULTS } from '../utils/smcStrategy'
+import type { SmcSettings } from '../utils/smcStrategy'
 import type { Candle } from '../types'
 
 const TIMEFRAMES = [
@@ -92,6 +94,9 @@ export default function ChartSandbox() {
   const [deepLoading,     setDeepLoading]     = useState(false)
   const [deepProgress,    setDeepProgress]    = useState(0)
   const [startingAccount, setStartingAccount] = useState(1000)
+  // SMC Strategy mode
+  const [smcMode,         setSmcMode]         = useState(false)
+  const [smcSettings,     setSmcSettings]     = useState<SmcSettings>({ ...SMC_DEFAULTS })
   // Live signal state
   const [liveSignal,      setLiveSignal]      = useState<LiveSignal | null>(null)
   const liveSignalSentRef = useRef<number>(0)  // timestamp of last signal sent — prevents duplicate POSTs
@@ -315,8 +320,23 @@ export default function ChartSandbox() {
     }
   }, [aiTrades, startingAccount, aiSettings.rrRatio, aiStats])
 
+  // SMC backtest — chart overlays use visible candles; stats use deep candles when loaded
+  const smcOverlays = useMemo(() => {
+    if (!smcMode) return []
+    const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
+    return runSmcBacktest(candles, { ...smcSettings, pipSize: pipSz }).overlays
+  }, [smcMode, candles, smcSettings, pair])
+
+  const { smcStats, smcTrades } = useMemo(() => {
+    if (!smcMode) return { smcStats: null, smcTrades: [] }
+    const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
+    const src = deepCandles.length > 0 ? deepCandles : candles
+    const r = runSmcBacktest(src, { ...smcSettings, pipSize: pipSz })
+    return { smcStats: r.stats, smcTrades: r.trades }
+  }, [smcMode, deepCandles, candles, smcSettings, pair])
+
   // Merge overlays: AI strategy overlays replace crossfire ones when active
-  const allOverlays = aiStrategyMode ? aiOverlays : chartOverlays
+  const allOverlays = smcMode ? smcOverlays : aiStrategyMode ? aiOverlays : chartOverlays
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const currentPrice = liveCandle?.close ?? 0
@@ -848,6 +868,71 @@ export default function ChartSandbox() {
                     </div>
                   )}
                 </div>
+
+                {/* SMC Order Block */}
+                <div className="rounded-lg overflow-hidden"
+                     style={{
+                       background: smcMode ? 'rgba(245,158,11,0.08)' : 'rgba(255,255,255,0.03)',
+                       border: `1px solid ${smcMode ? 'rgba(245,158,11,0.35)' : 'rgba(255,255,255,0.07)'}`,
+                     }}>
+                  <button
+                    onClick={() => { setSmcMode(m => !m); setAiStrategyMode(false); setActiveStrategy(null); setOpenMenu(null) }}
+                    className="w-full text-left px-3 py-2.5 text-xs font-semibold transition-all"
+                    style={{ color: smcMode ? '#FCD34D' : 'rgba(241,241,255,0.7)' }}>
+                    <span className="flex items-center justify-between">
+                      <span>{smcMode ? '✓ ' : ''}SMC Order Block</span>
+                      <span style={{ color: smcMode ? 'rgba(245,158,11,0.7)' : 'rgba(245,158,11,0.4)', fontSize: 9 }}>
+                        {smcMode ? 'ON' : 'backtest'}
+                      </span>
+                    </span>
+                    <div className="mt-0.5 text-[10px]" style={{ color: 'rgba(241,241,255,0.3)', fontWeight: 400 }}>
+                      Liquidity sweep · Fib zone · Order block entry
+                    </div>
+                  </button>
+                  {smcMode && (
+                    <div className="px-3 pb-3 flex flex-col gap-2 border-t" style={{ borderColor: 'rgba(245,158,11,0.1)' }}>
+                      <div className="flex items-center justify-between gap-2 pt-2">
+                        <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.45)' }}>R:R target</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>1:</span>
+                          <input type="number" min={1} max={10} step={0.5} value={smcSettings.rrRatio}
+                                 onChange={e => setSmcSettings(s => ({ ...s, rrRatio: Math.max(1, parseFloat(e.target.value) || 3) }))}
+                                 className="w-12 px-1.5 py-1 text-[10px] font-bold text-center rounded"
+                                 style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', color: '#FCD34D', outline: 'none' }} />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.45)' }}>Min sweep (pips)</span>
+                        <input type="number" min={1} max={20} step={0.5} value={smcSettings.minSweepPips}
+                               onChange={e => setSmcSettings(s => ({ ...s, minSweepPips: Math.max(0.5, parseFloat(e.target.value) || 2) }))}
+                               className="w-14 px-1.5 py-1 text-[10px] font-bold text-center rounded"
+                               style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', color: '#A78BFA', outline: 'none' }} />
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.45)' }}>Max SL (pips)</span>
+                        <input type="number" min={5} max={50} step={1} value={smcSettings.maxSlPips}
+                               onChange={e => setSmcSettings(s => ({ ...s, maxSlPips: Math.max(5, parseFloat(e.target.value) || 25) }))}
+                               className="w-14 px-1.5 py-1 text-[10px] font-bold text-center rounded"
+                               style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', color: '#F87171', outline: 'none' }} />
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.45)' }}>Session (UTC hrs)</span>
+                        <div className="flex items-center gap-1">
+                          <input type="number" min={0} max={23} step={1} value={smcSettings.sessionStart}
+                                 onChange={e => setSmcSettings(s => ({ ...s, sessionStart: parseInt(e.target.value) || 7 }))}
+                                 className="w-10 px-1 py-1 text-[10px] font-bold text-center rounded"
+                                 style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', color: '#4ADE80', outline: 'none' }} />
+                          <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>–</span>
+                          <input type="number" min={0} max={23} step={1} value={smcSettings.sessionEnd}
+                                 onChange={e => setSmcSettings(s => ({ ...s, sessionEnd: parseInt(e.target.value) || 17 }))}
+                                 className="w-10 px-1 py-1 text-[10px] font-bold text-center rounded"
+                                 style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', color: '#4ADE80', outline: 'none' }} />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
               </div>
             </div>
           )}
@@ -1017,6 +1102,32 @@ export default function ChartSandbox() {
                   style={{ color: 'rgba(241,241,255,0.4)', border: '1px solid rgba(255,255,255,0.1)' }}>
             ✕ dismiss
           </button>
+        </div>
+      )}
+      {/* ── SMC stats bar ── */}
+      {smcMode && smcStats && (
+        <div className="flex-shrink-0 flex items-center gap-4 px-4 py-2 flex-wrap"
+             style={{ background: 'rgba(8,6,22,0.98)', borderBottom: '1px solid rgba(245,158,11,0.25)' }}>
+          <span className="text-[10px] font-black uppercase tracking-widest mr-1" style={{ color: '#FCD34D' }}>◈ SMC Order Block</span>
+          <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: 'rgba(245,158,11,0.1)', color: 'rgba(252,211,77,0.7)', border: '1px solid rgba(245,158,11,0.2)' }}>
+            {pair} · {tf.label}
+          </span>
+          <div className="w-px h-4" style={{ background: 'rgba(255,255,255,0.08)' }} />
+          {smcStats.trades === 0 ? (
+            <span className="text-[10px]" style={{ color: 'rgba(241,241,255,0.4)' }}>No setups found — try zooming out or loading more history</span>
+          ) : (
+            <>
+              <StatChip label="Trades" value={String(smcStats.trades)} />
+              <StatChip label="Win Rate" value={`${smcStats.winRate.toFixed(1)}%`} color={smcStats.winRate >= 50 ? '#22C55E' : '#EF4444'} />
+              <StatChip label="Avg Win" value={`+${smcStats.avgWinPips.toFixed(1)}`} color="#22C55E" />
+              <StatChip label="Avg Loss" value={`−${smcStats.avgLossPips.toFixed(1)}`} color="#EF4444" />
+              <StatChip label="Expectancy" value={`${smcStats.expectancyPips >= 0 ? '+' : ''}${smcStats.expectancyPips.toFixed(1)} pips`} color={smcStats.expectancyPips >= 0 ? '#22C55E' : '#EF4444'} />
+              <div className="ml-auto text-[10px] tabular" style={{ color: 'rgba(241,241,255,0.3)' }}>
+                {smcStats.wins}W / {smcStats.losses}L{smcStats.openTrades > 0 ? ` / ${smcStats.openTrades} open` : ''}
+                {smcStats.dateFrom && <span className="ml-2" style={{ color: 'rgba(241,241,255,0.18)' }}>{smcStats.dateFrom} – {smcStats.dateTo}</span>}
+              </div>
+            </>
+          )}
         </div>
       )}
       <div ref={chartRef} className="flex-1 min-h-0 relative">

@@ -285,7 +285,27 @@ export default function CandlestickChart({
           const fx2 = Math.min(PL + chartW, Math.max(x1, x2))
           if (fx2 > fx1) {
             ctx.fillStyle = ov.fillColor ?? 'rgba(139,92,246,0.07)'
-            ctx.fillRect(fx1, PT, fx2 - fx1, priceH)
+            if (ov.priceBound) {
+              const ry1 = priceToY(Math.max(ov.y1, ov.y2))
+              const ry2 = priceToY(Math.min(ov.y1, ov.y2))
+              ctx.fillRect(fx1, ry1, fx2 - fx1, ry2 - ry1)
+              // border outline
+              ctx.strokeStyle = ov.color
+              ctx.lineWidth   = ov.lineWidth ?? 1
+              ctx.setLineDash(ov.dashPattern ?? [])
+              ctx.shadowBlur  = 4; ctx.shadowColor = ov.color
+              ctx.strokeRect(fx1, ry1, fx2 - fx1, ry2 - ry1)
+              ctx.shadowBlur = 0
+              if (ov.label) {
+                ctx.setLineDash([])
+                ctx.font      = 'bold 9px "Inter",monospace'
+                ctx.fillStyle = ov.color
+                ctx.textAlign = 'left'
+                ctx.fillText(ov.label, fx1 + 3, ry1 + 11)
+              }
+            } else {
+              ctx.fillRect(fx1, PT, fx2 - fx1, priceH)
+            }
           }
           continue
         }

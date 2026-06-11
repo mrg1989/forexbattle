@@ -1132,6 +1132,18 @@ export default function ChartSandbox() {
                         style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.35)', color: '#FCD34D' }}>
                   ✦ Analyse
                 </button>
+                <button
+                  onClick={handleDeepFetch}
+                  disabled={deepLoading}
+                  className="px-2 py-1 rounded text-[9px] font-bold transition-all"
+                  style={{
+                    background: deepLoading ? 'rgba(245,158,11,0.08)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.12)' : 'rgba(245,158,11,0.12)',
+                    border: `1px solid ${deepLoading ? 'rgba(245,158,11,0.2)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.35)' : 'rgba(245,158,11,0.35)'}`,
+                    color: deepLoading ? 'rgba(245,158,11,0.5)' : deepCandles.length > 0 ? '#4ADE80' : '#F59E0B',
+                    cursor: deepLoading ? 'default' : 'pointer',
+                  }}>
+                  {deepLoading ? `⧖ ${deepProgress}%…` : deepCandles.length > 0 ? `✓ Full History` : '⧖ Load History'}
+                </button>
               </div>
             </>
           )}

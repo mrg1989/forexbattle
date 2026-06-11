@@ -531,7 +531,7 @@ export const CROSSFIRE_AI_DEFAULTS: CrossfireAiSettings = {
   maxBodyPips:           20,     // filters out news/spike candles (109-pip body in dataset was NFP)
   maxWickRatio:          0.10,
   minMinutes:            15,
-  maxMinutes:            50,      // data: >50min = 22% WR vs 68% WR in first 50min
+  maxMinutes:            195,     // data (n=445): 15–195min = 43% WR; >195min = 26% WR
   maxSlPips:             20,
   useBodyLines:          false,
   requireTrendAlignment: false,

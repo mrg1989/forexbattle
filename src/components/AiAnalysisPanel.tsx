@@ -134,9 +134,14 @@ export default function AiAnalysisPanel({
     let maxDd   = 0
     // FTMO: track daily P&L (trades grouped by sessionDate)
     const dailyRunning = new Map<string, number>()
-    let maxDailyLoss   = 0   // worst single-day loss as % of startBalance
-    let ftmoBreachIdx  = -1  // first row index where 10% floor is breached
-    let ftmoMaxLoss    = 0   // worst balance drop from startBalance as %
+    let maxDailyLoss   = 0
+    let ftmoBreachIdx  = -1
+    let ftmoMaxLoss    = 0
+    // FTMO phase 1/2 milestones
+    let phase1PassIdx  = -1  // row where +10% first hit
+    let phase2PassIdx  = -1  // row where phase-2 notional +5% first hit
+    let p2Bal          = startBalance
+    let p2Active       = false
     const rows = closed.map((t, i) => {
       const prev    = balance
       if (t.result === 'win')  balance = balance * (1 + (riskPct / 100) * rrRatio)
@@ -145,21 +150,30 @@ export default function AiAnalysisPanel({
       const dd = (peak - balance) / peak * 100
       if (dd > maxDd) maxDd = dd
       const pnlAmt = balance - prev
-      // Daily accumulation for FTMO daily loss check
       const dayPnl = (dailyRunning.get(t.sessionDate) ?? 0) + pnlAmt
       dailyRunning.set(t.sessionDate, dayPnl)
       const dailyLossPct = Math.max(0, -dayPnl / startBalance * 100)
       if (dailyLossPct > maxDailyLoss) maxDailyLoss = dailyLossPct
-      // FTMO max loss = how far below initial (fixed floor)
       const ftmoLossPct = Math.max(0, (startBalance - balance) / startBalance * 100)
       if (ftmoLossPct > ftmoMaxLoss) ftmoMaxLoss = ftmoLossPct
       if (ftmoLossPct >= 10 && ftmoBreachIdx === -1) ftmoBreachIdx = i
       const dailyBreach = dailyLossPct >= 5
       const floorBreach = ftmoLossPct >= 10
-      return { n: i + 1, date: t.sessionDate, dir: t.direction, result: t.result, balance, dd, pnlAmt, ftmoLossPct, dailyLossPct, dailyBreach, floorBreach }
+      // Phase 1: first time balance >= startBalance * 1.10 without prior breach
+      let p1Pass = false, p2Pass = false
+      if (phase1PassIdx === -1 && ftmoBreachIdx === -1 && balance >= startBalance * 1.10) {
+        phase1PassIdx = i; p1Pass = true; p2Active = true
+      }
+      // Phase 2: notional fresh 100K account running after phase 1 passed
+      if (p2Active && !p1Pass && phase2PassIdx === -1) {
+        if (t.result === 'win') p2Bal = p2Bal * (1 + (riskPct / 100) * rrRatio)
+        else                    p2Bal = p2Bal * (1 - riskPct / 100)
+        if (p2Bal >= startBalance * 1.05) { phase2PassIdx = i; p2Pass = true }
+      }
+      return { n: i + 1, date: t.sessionDate, dir: t.direction, result: t.result, balance, dd, pnlAmt, ftmoLossPct, dailyLossPct, dailyBreach, floorBreach, p1Pass, p2Pass }
     })
     const totalReturn = startBalance > 0 ? (balance - startBalance) / startBalance * 100 : 0
-    return { rows, finalBalance: balance, totalReturn, maxDd, maxDailyLoss, ftmoMaxLoss, ftmoBreachIdx }
+    return { rows, finalBalance: balance, totalReturn, maxDd, maxDailyLoss, ftmoMaxLoss, ftmoBreachIdx, phase1PassIdx, phase2PassIdx }
   }, [trades, startBalance, riskPct, rrRatio, startDate])
 
   // Auto-scroll AI response
@@ -426,6 +440,16 @@ export default function AiAnalysisPanel({
                       ✓ Passes FTMO limits
                     </span>
                   )}
+                  {equityCurve.phase1PassIdx >= 0 && (
+                    <span className="text-[9px] px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)', color: '#4ADE80' }}>
+                      ✓ Phase 1 passed (trade #{equityCurve.phase1PassIdx + 1})
+                    </span>
+                  )}
+                  {equityCurve.phase2PassIdx >= 0 && (
+                    <span className="text-[9px] px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', color: '#FCD34D' }}>
+                      ✓ Phase 2 passed (trade #{equityCurve.phase2PassIdx + 1})
+                    </span>
+                  )}
                 </>}
                 <span className="text-[10px] font-bold tabular-nums" style={{ color: 'rgba(241,241,255,0.6)' }}>£{equityCurve.finalBalance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}</span>
               </>
@@ -513,19 +537,46 @@ export default function AiAnalysisPanel({
                   </thead>
                   <tbody>
                     {equityCurve.rows.map(row => (
-                      <tr
-                        key={row.n}
-                        onClick={() => setStartDate(row.date)}
-                        onMouseEnter={() => setHoveredRow(row.n)}
-                        onMouseLeave={() => setHoveredRow(null)}
-                        style={{
-                          borderBottom: '1px solid rgba(255,255,255,0.04)',
-                          background: hoveredRow === row.n
-                            ? 'rgba(139,92,246,0.1)'
-                            : ftmoMode && (row.floorBreach || row.dailyBreach) ? 'rgba(239,68,68,0.07)' : undefined,
-                          cursor: 'pointer',
-                        }}
-                      >
+                      <>
+                        {ftmoMode && row.p1Pass && (
+                          <tr key={`p1-${row.n}`}>
+                            <td colSpan={ftmoMode ? 8 : 7} className="py-1 px-2">
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-px" style={{ background: 'rgba(34,197,94,0.4)' }} />
+                                <span className="text-[9px] font-black px-2 py-0.5 rounded" style={{ background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)', color: '#4ADE80', whiteSpace: 'nowrap' }}>
+                                  🏁 PHASE 1 PASSED — +10% reached · £{row.balance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}
+                                </span>
+                                <div className="flex-1 h-px" style={{ background: 'rgba(34,197,94,0.4)' }} />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        {ftmoMode && row.p2Pass && (
+                          <tr key={`p2-${row.n}`}>
+                            <td colSpan={ftmoMode ? 8 : 7} className="py-1 px-2">
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-px" style={{ background: 'rgba(245,158,11,0.5)' }} />
+                                <span className="text-[9px] font-black px-2 py-0.5 rounded" style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.5)', color: '#FCD34D', whiteSpace: 'nowrap' }}>
+                                  🏆 PHASE 2 PASSED — FULLY FUNDED
+                                </span>
+                                <div className="flex-1 h-px" style={{ background: 'rgba(245,158,11,0.5)' }} />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        <tr
+                          key={`row-${row.n}`}
+                          onClick={() => setStartDate(row.date)}
+                          onMouseEnter={() => setHoveredRow(row.n)}
+                          onMouseLeave={() => setHoveredRow(null)}
+                          style={{
+                            borderBottom: '1px solid rgba(255,255,255,0.04)',
+                            background: hoveredRow === row.n
+                              ? 'rgba(139,92,246,0.1)'
+                              : ftmoMode && (row.floorBreach || row.dailyBreach) ? 'rgba(239,68,68,0.07)' : undefined,
+                            cursor: 'pointer',
+                          }}
+                        >
                         <td className="py-1 pr-2 tabular-nums" style={{ color: 'rgba(241,241,255,0.25)' }}>{row.n}</td>
                         <td className="py-1 pr-3" style={{ color: hoveredRow === row.n ? '#A78BFA' : 'rgba(241,241,255,0.5)', whiteSpace: 'nowrap' }}>
                           {new Date(row.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
@@ -565,6 +616,7 @@ export default function AiAnalysisPanel({
                           </td>
                         </>}
                       </tr>
+                      </>
                     ))}
                   </tbody>
                 </table>

@@ -120,11 +120,15 @@ export default function AiAnalysisPanel({
   const [startBalance, setStartBalance] = useState(100000)
   const [riskPct,      setRiskPct]      = useState(1.0)
   const [ftmoMode,     setFtmoMode]     = useState(false)
+  const [startDate,    setStartDate]    = useState('')
+  const [hoveredRow,   setHoveredRow]   = useState<number | null>(null)
   const textRef = useRef<HTMLDivElement>(null)
 
   // ── Equity curve ────────────────────────────────────────────────────────────
   const equityCurve = useMemo(() => {
-    const closed = trades.filter(t => t.result === 'win' || t.result === 'loss')
+    const allClosed = trades.filter(t => t.result === 'win' || t.result === 'loss')
+    const startTs = startDate ? new Date(startDate).getTime() : 0
+    const closed = startDate ? allClosed.filter(t => new Date(t.sessionDate).getTime() >= startTs) : allClosed
     let balance = startBalance
     let peak    = startBalance
     let maxDd   = 0
@@ -156,7 +160,7 @@ export default function AiAnalysisPanel({
     })
     const totalReturn = startBalance > 0 ? (balance - startBalance) / startBalance * 100 : 0
     return { rows, finalBalance: balance, totalReturn, maxDd, maxDailyLoss, ftmoMaxLoss, ftmoBreachIdx }
-  }, [trades, startBalance, riskPct, rrRatio])
+  }, [trades, startBalance, riskPct, rrRatio, startDate])
 
   // Auto-scroll AI response
   useEffect(() => {
@@ -366,6 +370,14 @@ export default function AiAnalysisPanel({
                 color: ftmoMode ? '#F59E0B' : 'rgba(241,241,255,0.35)',
               }}
             >FTMO Rules</button>
+            {startDate && (
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.3)', color: '#A78BFA' }}>
+                  From {new Date(startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}
+                </span>
+                <button onClick={() => setStartDate('')} className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{ color: '#F87171', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)' }}>✕ Reset</button>
+              </div>
+            )}
             <div className="flex items-center gap-1">
               <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>Start £</span>
               <input
@@ -501,13 +513,23 @@ export default function AiAnalysisPanel({
                   </thead>
                   <tbody>
                     {equityCurve.rows.map(row => (
-                      <tr key={row.n} style={{
-                        borderBottom: '1px solid rgba(255,255,255,0.04)',
-                        background: ftmoMode && (row.floorBreach || row.dailyBreach) ? 'rgba(239,68,68,0.07)' : undefined,
-                      }}>
+                      <tr
+                        key={row.n}
+                        onClick={() => setStartDate(row.date)}
+                        onMouseEnter={() => setHoveredRow(row.n)}
+                        onMouseLeave={() => setHoveredRow(null)}
+                        style={{
+                          borderBottom: '1px solid rgba(255,255,255,0.04)',
+                          background: hoveredRow === row.n
+                            ? 'rgba(139,92,246,0.1)'
+                            : ftmoMode && (row.floorBreach || row.dailyBreach) ? 'rgba(239,68,68,0.07)' : undefined,
+                          cursor: 'pointer',
+                        }}
+                      >
                         <td className="py-1 pr-2 tabular-nums" style={{ color: 'rgba(241,241,255,0.25)' }}>{row.n}</td>
-                        <td className="py-1 pr-3" style={{ color: 'rgba(241,241,255,0.5)', whiteSpace: 'nowrap' }}>
+                        <td className="py-1 pr-3" style={{ color: hoveredRow === row.n ? '#A78BFA' : 'rgba(241,241,255,0.5)', whiteSpace: 'nowrap' }}>
                           {new Date(row.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
+                          {hoveredRow === row.n && <span className="ml-1 text-[8px]" style={{ color: '#A78BFA' }}>← start here</span>}
                         </td>
                         <td className="py-1 px-1 text-center">
                           <span className="px-1 rounded text-[9px] font-bold" style={{

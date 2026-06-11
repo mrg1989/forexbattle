@@ -202,6 +202,17 @@ function setupToOverlays(trade: SmcTrade, settings: SmcSettings): LineOverlay[] 
 }
 
 // ── Core detection engine ─────────────────────────────────────────────────────
+//
+// Algorithm (correct SMC sweep logic):
+//
+//  For each candle i (the potential sweep candle):
+//    → Look BACK up to swingSearchBars candles to find recent confirmed swing lows/highs
+//    → A confirmed swing low at index k means: candle k has the lowest LOW
+//      in the window [k-lb .. k+lb], AND k+lb < i (fully confirmed, no future overlap)
+//    → If candle i wicks BELOW that swing low (and closes back ABOVE it) → bullish sweep
+//    → Find order block: last BEARISH candle before i (in previous ~10 candles)
+//    → Fib levels: sweep wick tip → sweep candle high (or nearby impulse high)
+//    → Look ahead for a retracement entry in the 50–79% zone
 
 export function runSmcBacktest(
   candles: Candle[],
@@ -214,197 +225,190 @@ export function runSmcBacktest(
   const { pipSize, swingLookback: lb, minSweepPips, maxEntryBars,
           fib50, fib79, minSlPips, maxSlPips, sessionStart, sessionEnd, rrRatio } = settings
 
-  const trades: SmcTrade[]   = []
+  // How far back to search for a swing level to sweep
+  const swingSearchBars = 80
+
+  const trades: SmcTrade[]      = []
   const overlays: LineOverlay[] = []
+  const usedSweepTs = new Set<number>()
 
-  // Track which candle indices have already been used as sweep origins
-  const usedSweeps = new Set<number>()
-
-  for (let i = lb; i < candles.length - lb - 1; i++) {
-    const d = new Date(candles[i].timestamp)
-    const hr = d.getHours()
+  for (let i = lb * 2 + 1; i < candles.length - 1; i++) {
+    const c  = candles[i]
+    const hr = new Date(c.timestamp).getHours()
     if (hr < sessionStart || hr >= sessionEnd) continue
+    if (usedSweepTs.has(c.timestamp)) continue
 
-    // ── Bullish setup: sweep below a swing low ─────────────────────────────
-    if (isSwingLow(candles, i, lb)) {
-      const swingLow = candles[i].low
+    // Skip if there's already an active (open) trade — one at a time
+    const lastTrade = trades.length > 0 ? trades[trades.length - 1] : null
+    if (lastTrade && lastTrade.result === 'open') continue
+    if (lastTrade && lastTrade.exitTs !== null && c.timestamp < lastTrade.exitTs) continue
 
-      // Look ahead for a candle that wicks below swingLow then closes above it
-      for (let j = i + 1; j <= Math.min(i + 3, candles.length - 1); j++) {
-        const sweepCandle = candles[j]
-        const sweepAmount = (swingLow - sweepCandle.low) / pipSize
-        if (sweepAmount < minSweepPips) continue
-        if (sweepCandle.close <= swingLow) continue  // must close back above
+    // ── Bullish setup: candle i wicks below a recent confirmed swing low ────
+    {
+      // Find most recent confirmed swing low strictly before candle i
+      let swingPrice = Infinity
+      let swingIdx   = -1
+      const searchFrom = Math.max(lb, i - swingSearchBars)
+      for (let k = i - lb - 1; k >= searchFrom; k--) {
+        // Confirmed: k+lb < i ensures the right side is fully confirmed before i
+        if (k + lb >= i) continue
+        if (isSwingLow(candles, k, lb)) {
+          swingPrice = candles[k].low
+          swingIdx   = k
+          break   // take the most recent confirmed swing low
+        }
+      }
 
-        if (usedSweeps.has(j)) break
-        usedSweeps.add(j)
-
-        const sweepWickTip = sweepCandle.low
-        const impulseHigh  = sweepCandle.high
-
-        // Find order block: last bearish candle before the sweep
-        let obIdx = j - 1
-        while (obIdx > 0 && candles[obIdx].close >= candles[obIdx].open) obIdx--
-        const ob = candles[obIdx]
-
-        // Fib levels: from sweep wick tip up to impulse high
-        const move      = impulseHigh - sweepWickTip
-        const fib50Price = impulseHigh - move * fib50
-        const fib79Price = impulseHigh - move * fib79
-
-        const entryZoneHigh = Math.max(fib50Price, fib79Price)
-        const entryZoneLow  = Math.min(fib50Price, fib79Price)
-
-        // Look for price to retrace into the Fib zone
-        let entryCandle: Candle | null = null
-        let entryIdx    = -1
-        for (let k = j + 1; k <= Math.min(j + maxEntryBars, candles.length - 1); k++) {
-          const c = candles[k]
-          // Price enters zone and closes bullishly inside it
-          if (c.close >= entryZoneLow && c.close <= entryZoneHigh && c.close > c.open) {
-            entryCandle = c
-            entryIdx    = k
-            break
+      if (swingIdx >= 0 && c.low < swingPrice && c.close > swingPrice) {
+        const sweepPips = (swingPrice - c.low) / pipSize
+        if (sweepPips >= minSweepPips) {
+          const sweepWickTip = c.low
+          // Impulse high: highest high in this candle and next 2
+          let impulseHigh = c.high
+          for (let k = i + 1; k <= Math.min(i + 3, candles.length - 1); k++) {
+            impulseHigh = Math.max(impulseHigh, candles[k].high)
           }
-          // If price goes below the sweep wick, setup is invalidated
-          if (c.low < sweepWickTip) break
-        }
-        if (!entryCandle) break
 
-        const entry  = entryCandle.close
-        const slRaw  = sweepWickTip - 2 * pipSize
-        const slPips = (entry - slRaw) / pipSize
-        if (slPips < minSlPips || slPips > maxSlPips) break
+          // Order block: last bearish candle in the 15 candles before i
+          let obIdx = i - 1
+          while (obIdx > Math.max(0, i - 15) && candles[obIdx].close >= candles[obIdx].open) obIdx--
+          const ob = candles[Math.max(0, obIdx)]
 
-        const tpPips = slPips * rrRatio
-        const tp     = entry + tpPips * pipSize
+          // Fib levels: from wick tip up to impulse high
+          const move       = impulseHigh - sweepWickTip
+          const fib50Price = impulseHigh - move * fib50
+          const fib79Price = impulseHigh - move * fib79
+          const zoneHigh   = Math.max(fib50Price, fib79Price)
+          const zoneLow    = Math.min(fib50Price, fib79Price)
 
-        // Simulate exit
-        let result: 'win' | 'loss' | 'open' = 'open'
-        let exitTs: number | null = null
-        let pnlPips = 0
-        for (let m = entryIdx + 1; m < candles.length; m++) {
-          const fc = candles[m]
-          if (fc.low <= slRaw)  { result = 'loss'; exitTs = fc.timestamp; pnlPips = -slPips; break }
-          if (fc.high >= tp)    { result = 'win';  exitTs = fc.timestamp; pnlPips =  tpPips; break }
-          if (m === candles.length - 1) {
-            pnlPips = (fc.close - entry) / pipSize
-            exitTs  = fc.timestamp
+          // Look ahead for bullish close inside the Fib zone
+          let entryCandle: Candle | null = null
+          let entryIdx = -1
+          for (let k = i + 1; k <= Math.min(i + maxEntryBars, candles.length - 1); k++) {
+            const fc = candles[k]
+            // Invalidate if price goes below the sweep wick
+            if (fc.low < sweepWickTip - pipSize) break
+            // Entry: bullish close inside zone
+            if (fc.close >= zoneLow && fc.close <= zoneHigh && fc.close > fc.open) {
+              entryCandle = fc; entryIdx = k; break
+            }
+          }
+
+          if (entryCandle) {
+            const entry  = entryCandle.close
+            const slRaw  = sweepWickTip - 2 * pipSize
+            const slPips = (entry - slRaw) / pipSize
+            if (slPips >= minSlPips && slPips <= maxSlPips) {
+              const tpPips = slPips * rrRatio
+              const tp     = entry + tpPips * pipSize
+
+              let result: 'win' | 'loss' | 'open' = 'open'
+              let exitTs: number | null = null
+              let pnlPips = 0
+              for (let m = entryIdx + 1; m < candles.length; m++) {
+                const fc = candles[m]
+                if (fc.low  <= slRaw) { result = 'loss'; exitTs = fc.timestamp; pnlPips = -slPips; break }
+                if (fc.high >= tp)    { result = 'win';  exitTs = fc.timestamp; pnlPips =  tpPips; break }
+                if (m === candles.length - 1) { pnlPips = (fc.close - entry) / pipSize; exitTs = fc.timestamp }
+              }
+
+              const t: SmcTrade = {
+                direction: 'buy', sessionDate: new Date(c.timestamp).toDateString(),
+                sweepTs: c.timestamp, sweepWickTip, swingLevel: swingPrice,
+                obHigh: ob.high, obLow: ob.low,
+                fib50Price, fib79Price,
+                entryTs: entryCandle.timestamp, entryPrice: entry,
+                slPrice: slRaw, tpPrice: tp, exitTs, result, pnlPips,
+              }
+              trades.push(t)
+              usedSweepTs.add(c.timestamp)
+              overlays.push(...setupToOverlays(t, settings))
+              overlays.push(...tradeToOverlays(t, candles[candles.length - 1].timestamp))
+            }
           }
         }
-
-        const smcTrade: SmcTrade = {
-          direction: 'buy',
-          sessionDate: d.toDateString(),
-          sweepTs: sweepCandle.timestamp,
-          sweepWickTip,
-          swingLevel: swingLow,
-          obHigh: ob.high,
-          obLow:  ob.low,
-          fib50Price,
-          fib79Price,
-          entryTs:    entryCandle.timestamp,
-          entryPrice: entry,
-          slPrice:    slRaw,
-          tpPrice:    tp,
-          exitTs,
-          result,
-          pnlPips,
-        }
-
-        trades.push(smcTrade)
-        overlays.push(...setupToOverlays(smcTrade, settings))
-        overlays.push(...tradeToOverlays(smcTrade, candles[candles.length - 1].timestamp))
-        break
       }
     }
 
-    // ── Bearish setup: sweep above a swing high ────────────────────────────
-    if (isSwingHigh(candles, i, lb)) {
-      const swingHigh = candles[i].high
+    if (usedSweepTs.has(c.timestamp)) continue  // already used as bullish sweep
 
-      for (let j = i + 1; j <= Math.min(i + 3, candles.length - 1); j++) {
-        const sweepCandle = candles[j]
-        const sweepAmount = (sweepCandle.high - swingHigh) / pipSize
-        if (sweepAmount < minSweepPips) continue
-        if (sweepCandle.close >= swingHigh) continue  // must close back below
+    // ── Bearish setup: candle i wicks above a recent confirmed swing high ───
+    {
+      let swingPrice = -Infinity
+      let swingIdx   = -1
+      const searchFrom = Math.max(lb, i - swingSearchBars)
+      for (let k = i - lb - 1; k >= searchFrom; k--) {
+        if (k + lb >= i) continue
+        if (isSwingHigh(candles, k, lb)) {
+          swingPrice = candles[k].high
+          swingIdx   = k
+          break
+        }
+      }
 
-        if (usedSweeps.has(j)) break
-        usedSweeps.add(j)
-
-        const sweepWickTip = sweepCandle.high
-        const impulseLow   = sweepCandle.low
-
-        // Find order block: last bullish candle before the sweep
-        let obIdx = j - 1
-        while (obIdx > 0 && candles[obIdx].close <= candles[obIdx].open) obIdx--
-        const ob = candles[obIdx]
-
-        // Fib levels: from sweep wick tip down to impulse low
-        const move       = sweepWickTip - impulseLow
-        const fib50Price = impulseLow + move * fib50
-        const fib79Price = impulseLow + move * fib79
-
-        const entryZoneHigh = Math.max(fib50Price, fib79Price)
-        const entryZoneLow  = Math.min(fib50Price, fib79Price)
-
-        let entryCandle: Candle | null = null
-        let entryIdx    = -1
-        for (let k = j + 1; k <= Math.min(j + maxEntryBars, candles.length - 1); k++) {
-          const c = candles[k]
-          if (c.close >= entryZoneLow && c.close <= entryZoneHigh && c.close < c.open) {
-            entryCandle = c
-            entryIdx    = k
-            break
+      if (swingIdx >= 0 && c.high > swingPrice && c.close < swingPrice) {
+        const sweepPips = (c.high - swingPrice) / pipSize
+        if (sweepPips >= minSweepPips) {
+          const sweepWickTip = c.high
+          let impulseLow = c.low
+          for (let k = i + 1; k <= Math.min(i + 3, candles.length - 1); k++) {
+            impulseLow = Math.min(impulseLow, candles[k].low)
           }
-          if (c.high > sweepWickTip) break
-        }
-        if (!entryCandle) break
 
-        const entry  = entryCandle.close
-        const slRaw  = sweepWickTip + 2 * pipSize
-        const slPips = (slRaw - entry) / pipSize
-        if (slPips < minSlPips || slPips > maxSlPips) break
+          // Order block: last bullish candle in the 15 candles before i
+          let obIdx = i - 1
+          while (obIdx > Math.max(0, i - 15) && candles[obIdx].close <= candles[obIdx].open) obIdx--
+          const ob = candles[Math.max(0, obIdx)]
 
-        const tpPips = slPips * rrRatio
-        const tp     = entry - tpPips * pipSize
+          const move       = sweepWickTip - impulseLow
+          const fib50Price = impulseLow + move * fib50
+          const fib79Price = impulseLow + move * fib79
+          const zoneHigh   = Math.max(fib50Price, fib79Price)
+          const zoneLow    = Math.min(fib50Price, fib79Price)
 
-        let result: 'win' | 'loss' | 'open' = 'open'
-        let exitTs: number | null = null
-        let pnlPips = 0
-        for (let m = entryIdx + 1; m < candles.length; m++) {
-          const fc = candles[m]
-          if (fc.high >= slRaw)  { result = 'loss'; exitTs = fc.timestamp; pnlPips = -slPips; break }
-          if (fc.low  <= tp)     { result = 'win';  exitTs = fc.timestamp; pnlPips =  tpPips; break }
-          if (m === candles.length - 1) {
-            pnlPips = (entry - fc.close) / pipSize
-            exitTs  = fc.timestamp
+          let entryCandle: Candle | null = null
+          let entryIdx = -1
+          for (let k = i + 1; k <= Math.min(i + maxEntryBars, candles.length - 1); k++) {
+            const fc = candles[k]
+            if (fc.high > sweepWickTip + pipSize) break
+            if (fc.close >= zoneLow && fc.close <= zoneHigh && fc.close < fc.open) {
+              entryCandle = fc; entryIdx = k; break
+            }
+          }
+
+          if (entryCandle) {
+            const entry  = entryCandle.close
+            const slRaw  = sweepWickTip + 2 * pipSize
+            const slPips = (slRaw - entry) / pipSize
+            if (slPips >= minSlPips && slPips <= maxSlPips) {
+              const tpPips = slPips * rrRatio
+              const tp     = entry - tpPips * pipSize
+
+              let result: 'win' | 'loss' | 'open' = 'open'
+              let exitTs: number | null = null
+              let pnlPips = 0
+              for (let m = entryIdx + 1; m < candles.length; m++) {
+                const fc = candles[m]
+                if (fc.high >= slRaw) { result = 'loss'; exitTs = fc.timestamp; pnlPips = -slPips; break }
+                if (fc.low  <= tp)    { result = 'win';  exitTs = fc.timestamp; pnlPips =  tpPips; break }
+                if (m === candles.length - 1) { pnlPips = (entry - fc.close) / pipSize; exitTs = fc.timestamp }
+              }
+
+              const t: SmcTrade = {
+                direction: 'sell', sessionDate: new Date(c.timestamp).toDateString(),
+                sweepTs: c.timestamp, sweepWickTip, swingLevel: swingPrice,
+                obHigh: ob.high, obLow: ob.low,
+                fib50Price, fib79Price,
+                entryTs: entryCandle.timestamp, entryPrice: entry,
+                slPrice: slRaw, tpPrice: tp, exitTs, result, pnlPips,
+              }
+              trades.push(t)
+              usedSweepTs.add(c.timestamp)
+              overlays.push(...setupToOverlays(t, settings))
+              overlays.push(...tradeToOverlays(t, candles[candles.length - 1].timestamp))
+            }
           }
         }
-
-        const smcTrade: SmcTrade = {
-          direction: 'sell',
-          sessionDate: d.toDateString(),
-          sweepTs: sweepCandle.timestamp,
-          sweepWickTip,
-          swingLevel: swingHigh,
-          obHigh: ob.high,
-          obLow:  ob.low,
-          fib50Price,
-          fib79Price,
-          entryTs:    entryCandle.timestamp,
-          entryPrice: entry,
-          slPrice:    slRaw,
-          tpPrice:    tp,
-          exitTs,
-          result,
-          pnlPips,
-        }
-
-        trades.push(smcTrade)
-        overlays.push(...setupToOverlays(smcTrade, settings))
-        overlays.push(...tradeToOverlays(smcTrade, candles[candles.length - 1].timestamp))
-        break
       }
     }
   }

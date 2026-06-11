@@ -1122,9 +1122,16 @@ export default function ChartSandbox() {
               <StatChip label="Avg Win" value={`+${smcStats.avgWinPips.toFixed(1)}`} color="#22C55E" />
               <StatChip label="Avg Loss" value={`−${smcStats.avgLossPips.toFixed(1)}`} color="#EF4444" />
               <StatChip label="Expectancy" value={`${smcStats.expectancyPips >= 0 ? '+' : ''}${smcStats.expectancyPips.toFixed(1)} pips`} color={smcStats.expectancyPips >= 0 ? '#22C55E' : '#EF4444'} />
-              <div className="ml-auto text-[10px] tabular" style={{ color: 'rgba(241,241,255,0.3)' }}>
-                {smcStats.wins}W / {smcStats.losses}L{smcStats.openTrades > 0 ? ` / ${smcStats.openTrades} open` : ''}
-                {smcStats.dateFrom && <span className="ml-2" style={{ color: 'rgba(241,241,255,0.18)' }}>{smcStats.dateFrom} – {smcStats.dateTo}</span>}
+              <div className="ml-auto flex items-center gap-3">
+                <span className="text-[10px] tabular" style={{ color: 'rgba(241,241,255,0.3)' }}>
+                  {smcStats.wins}W / {smcStats.losses}L{smcStats.openTrades > 0 ? ` / ${smcStats.openTrades} open` : ''}
+                  {smcStats.dateFrom && <span className="ml-2" style={{ color: 'rgba(241,241,255,0.18)' }}>{smcStats.dateFrom} – {smcStats.dateTo}</span>}
+                </span>
+                <button onClick={() => setShowAiPanel(true)}
+                        className="px-2 py-1 rounded text-[9px] font-bold transition-all"
+                        style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.35)', color: '#FCD34D' }}>
+                  ✦ Analyse
+                </button>
               </div>
             </>
           )}
@@ -1180,13 +1187,13 @@ export default function ChartSandbox() {
     {/* ── AI Analysis Panel (full-screen overlay) ────────────────────────────── */}
     {showAiPanel && (
       <AiAnalysisPanel
-        trades={aiStrategyMode ? aiTrades : btTrades}
-        candles={aiStrategyMode && deepCandles.length > 0 ? deepCandles : candles}
+        trades={smcMode ? smcTrades : aiStrategyMode ? aiTrades : btTrades}
+        candles={deepCandles.length > 0 ? deepCandles : candles}
         pair={pair}
         tfLabel={tf.label}
-        slMode={aiStrategyMode ? 'dynamic (AI filtered)' : slMode}
+        slMode={smcMode ? 'SMC Order Block' : aiStrategyMode ? 'dynamic (AI filtered)' : slMode}
         slPips={slPips}
-        rrRatio={aiStrategyMode ? aiSettings.rrRatio : rrRatio}
+        rrRatio={smcMode ? smcSettings.rrRatio : aiStrategyMode ? aiSettings.rrRatio : rrRatio}
         onClose={() => setShowAiPanel(false)}
       />
     )}

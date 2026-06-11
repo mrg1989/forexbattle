@@ -119,6 +119,7 @@ export default function AiAnalysisPanel({
   const [copied,     setCopied]     = useState(false)
   const [startBalance, setStartBalance] = useState(100000)
   const [riskPct,      setRiskPct]      = useState(1.0)
+  const [ftmoMode,     setFtmoMode]     = useState(false)
   const textRef = useRef<HTMLDivElement>(null)
 
   // ── Equity curve ────────────────────────────────────────────────────────────
@@ -127,6 +128,11 @@ export default function AiAnalysisPanel({
     let balance = startBalance
     let peak    = startBalance
     let maxDd   = 0
+    // FTMO: track daily P&L (trades grouped by sessionDate)
+    const dailyRunning = new Map<string, number>()
+    let maxDailyLoss   = 0   // worst single-day loss as % of startBalance
+    let ftmoBreachIdx  = -1  // first row index where 10% floor is breached
+    let ftmoMaxLoss    = 0   // worst balance drop from startBalance as %
     const rows = closed.map((t, i) => {
       const prev    = balance
       if (t.result === 'win')  balance = balance * (1 + (riskPct / 100) * rrRatio)
@@ -134,10 +140,22 @@ export default function AiAnalysisPanel({
       peak  = Math.max(peak, balance)
       const dd = (peak - balance) / peak * 100
       if (dd > maxDd) maxDd = dd
-      return { n: i + 1, date: t.sessionDate, dir: t.direction, result: t.result, balance, dd, pnlAmt: balance - prev }
+      const pnlAmt = balance - prev
+      // Daily accumulation for FTMO daily loss check
+      const dayPnl = (dailyRunning.get(t.sessionDate) ?? 0) + pnlAmt
+      dailyRunning.set(t.sessionDate, dayPnl)
+      const dailyLossPct = Math.max(0, -dayPnl / startBalance * 100)
+      if (dailyLossPct > maxDailyLoss) maxDailyLoss = dailyLossPct
+      // FTMO max loss = how far below initial (fixed floor)
+      const ftmoLossPct = Math.max(0, (startBalance - balance) / startBalance * 100)
+      if (ftmoLossPct > ftmoMaxLoss) ftmoMaxLoss = ftmoLossPct
+      if (ftmoLossPct >= 10 && ftmoBreachIdx === -1) ftmoBreachIdx = i
+      const dailyBreach = dailyLossPct >= 5
+      const floorBreach = ftmoLossPct >= 10
+      return { n: i + 1, date: t.sessionDate, dir: t.direction, result: t.result, balance, dd, pnlAmt, ftmoLossPct, dailyLossPct, dailyBreach, floorBreach }
     })
     const totalReturn = startBalance > 0 ? (balance - startBalance) / startBalance * 100 : 0
-    return { rows, finalBalance: balance, totalReturn, maxDd }
+    return { rows, finalBalance: balance, totalReturn, maxDd, maxDailyLoss, ftmoMaxLoss, ftmoBreachIdx }
   }, [trades, startBalance, riskPct, rrRatio])
 
   // Auto-scroll AI response
@@ -339,6 +357,15 @@ export default function AiAnalysisPanel({
             style={{ background: 'rgba(8,8,28,0.9)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}
           >
             <span className="text-[9px] font-black uppercase tracking-widest" style={{ color: 'rgba(241,241,255,0.4)' }}>Equity Curve</span>
+            <button
+              onClick={() => setFtmoMode(f => !f)}
+              className="px-2 py-0.5 rounded text-[9px] font-bold transition-all"
+              style={{
+                background: ftmoMode ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.05)',
+                border: `1px solid ${ftmoMode ? 'rgba(245,158,11,0.5)' : 'rgba(255,255,255,0.1)'}`,
+                color: ftmoMode ? '#F59E0B' : 'rgba(241,241,255,0.35)',
+              }}
+            >FTMO Rules</button>
             <div className="flex items-center gap-1">
               <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>Start £</span>
               <input
@@ -364,8 +391,30 @@ export default function AiAnalysisPanel({
                   {equityCurve.totalReturn >= 0 ? '+' : ''}{equityCurve.totalReturn.toFixed(1)}%
                 </span>
                 <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>return</span>
-                <span className="text-[10px] font-bold tabular-nums" style={{ color: '#F87171' }}>-{equityCurve.maxDd.toFixed(1)}%</span>
-                <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>max DD</span>
+                {!ftmoMode && <>
+                  <span className="text-[10px] font-bold tabular-nums" style={{ color: '#F87171' }}>-{equityCurve.maxDd.toFixed(1)}%</span>
+                  <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>max DD</span>
+                </>}
+                {ftmoMode && <>
+                  <span className="text-[10px] font-bold tabular-nums" style={{ color: equityCurve.ftmoMaxLoss >= 10 ? '#EF4444' : equityCurve.ftmoMaxLoss >= 7 ? '#F59E0B' : '#4ADE80' }}>
+                    -{equityCurve.ftmoMaxLoss.toFixed(1)}%
+                  </span>
+                  <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>vs floor (10% limit)</span>
+                  <span className="text-[10px] font-bold tabular-nums" style={{ color: equityCurve.maxDailyLoss >= 5 ? '#EF4444' : equityCurve.maxDailyLoss >= 3.5 ? '#F59E0B' : '#4ADE80' }}>
+                    -{equityCurve.maxDailyLoss.toFixed(1)}%
+                  </span>
+                  <span className="text-[9px]" style={{ color: 'rgba(241,241,255,0.3)' }}>worst day (5% limit)</span>
+                  {equityCurve.ftmoBreachIdx >= 0 && (
+                    <span className="text-[9px] px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.4)', color: '#F87171' }}>
+                      ✕ FAILS at trade #{equityCurve.ftmoBreachIdx + 1}
+                    </span>
+                  )}
+                  {equityCurve.ftmoBreachIdx === -1 && equityCurve.rows.length > 0 && (
+                    <span className="text-[9px] px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)', color: '#4ADE80' }}>
+                      ✓ Passes FTMO limits
+                    </span>
+                  )}
+                </>}
                 <span className="text-[10px] font-bold tabular-nums" style={{ color: 'rgba(241,241,255,0.6)' }}>£{equityCurve.finalBalance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}</span>
               </>
             )}
@@ -443,12 +492,19 @@ export default function AiAnalysisPanel({
                       <th className="text-center py-1.5 px-1 font-bold" style={{ color: 'rgba(241,241,255,0.3)', width: 28 }}>R</th>
                       <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>P&amp;L</th>
                       <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>Balance</th>
-                      <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>DD%</th>
+                      {!ftmoMode && <th className="text-right py-1.5 pl-2 font-bold" style={{ color: 'rgba(241,241,255,0.3)' }}>DD%</th>}
+                      {ftmoMode && <>
+                        <th className="text-right py-1.5 pl-2 font-bold" style={{ color: '#F59E0B' }}>vs Floor</th>
+                        <th className="text-right py-1.5 pl-2 font-bold" style={{ color: '#F59E0B' }}>Day loss</th>
+                      </>}
                     </tr>
                   </thead>
                   <tbody>
                     {equityCurve.rows.map(row => (
-                      <tr key={row.n} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <tr key={row.n} style={{
+                        borderBottom: '1px solid rgba(255,255,255,0.04)',
+                        background: ftmoMode && (row.floorBreach || row.dailyBreach) ? 'rgba(239,68,68,0.07)' : undefined,
+                      }}>
                         <td className="py-1 pr-2 tabular-nums" style={{ color: 'rgba(241,241,255,0.25)' }}>{row.n}</td>
                         <td className="py-1 pr-3" style={{ color: 'rgba(241,241,255,0.5)', whiteSpace: 'nowrap' }}>
                           {new Date(row.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
@@ -471,9 +527,21 @@ export default function AiAnalysisPanel({
                         <td className="py-1 pl-2 text-right tabular-nums" style={{ color: 'rgba(241,241,255,0.7)' }}>
                           £{row.balance.toLocaleString('en-GB', { maximumFractionDigits: 0 })}
                         </td>
-                        <td className="py-1 pl-2 text-right tabular-nums" style={{ color: row.dd > 5 ? '#F87171' : row.dd > 0 ? '#F59E0B' : '#4ADE80' }}>
-                          {row.dd > 0 ? `-${row.dd.toFixed(1)}%` : '—'}
-                        </td>
+                        {!ftmoMode && (
+                          <td className="py-1 pl-2 text-right tabular-nums" style={{ color: row.dd > 5 ? '#F87171' : row.dd > 0 ? '#F59E0B' : '#4ADE80' }}>
+                            {row.dd > 0 ? `-${row.dd.toFixed(1)}%` : '—'}
+                          </td>
+                        )}
+                        {ftmoMode && <>
+                          <td className="py-1 pl-2 text-right tabular-nums font-bold" style={{ color: row.floorBreach ? '#EF4444' : row.ftmoLossPct >= 7 ? '#F59E0B' : row.ftmoLossPct > 0 ? 'rgba(241,241,255,0.5)' : '#4ADE80' }}>
+                            {row.ftmoLossPct > 0 ? `-${row.ftmoLossPct.toFixed(1)}%` : '—'}
+                            {row.floorBreach && <span className="ml-1 text-[8px]">✕</span>}
+                          </td>
+                          <td className="py-1 pl-2 text-right tabular-nums font-bold" style={{ color: row.dailyBreach ? '#EF4444' : row.dailyLossPct >= 3.5 ? '#F59E0B' : row.dailyLossPct > 0 ? 'rgba(241,241,255,0.4)' : 'rgba(241,241,255,0.2)' }}>
+                            {row.dailyLossPct > 0 ? `-${row.dailyLossPct.toFixed(1)}%` : '—'}
+                            {row.dailyBreach && <span className="ml-1 text-[8px]">✕</span>}
+                          </td>
+                        </>}
                       </tr>
                     ))}
                   </tbody>

@@ -1,6 +1,6 @@
 // Server-side OANDA REST client for candle ingestion.
 // NOT a browser proxy — calls OANDA directly using OANDA_TOKEN from process.env.
-// Must only be imported from api/ serverless functions or src/lib/candle-ingestion.ts.
+// Must only be imported from api/ serverless functions or api/_lib/candle-ingestion.ts.
 
 const OANDA_BASE  = 'https://api-fxpractice.oanda.com/v3'
 const PAGE_SIZE   = 5000

@@ -1,0 +1,333 @@
+// ── Datasource ────────────────────────────────────────────────────────────────
+// Prisma 7: URL configuration has moved to prisma.config.ts.
+// DATABASE_URL  : Supabase pooler connection string (runtime, via @prisma/adapter-pg)
+// DIRECT_URL    : Supabase direct connection string (CLI migrations, in prisma.config.ts)
+// Both live in .env.local — never commit actual values.
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ── Candle storage ────────────────────────────────────────────────────────────
+
+model Candle {
+  id           String   @id @default(cuid())
+  symbol       String                          // e.g. "EUR_USD"
+  timeframe    String                          // e.g. "M15"
+  timestampUtc DateTime @map("timestamp_utc") // UTC open time of the candle
+  open         Float
+  high         Float
+  low          Float
+  close        Float
+  volume       Int
+  spread       Float?
+  source       String   @default("oanda")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([symbol, timeframe, timestampUtc])
+  @@map("candles")
+}
+
+model ImportLog {
+  id           String   @id @default(cuid())
+  symbol       String
+  timeframe    String
+  fromDate     DateTime @map("from_date")
+  toDate       DateTime @map("to_date")
+  candleCount  Int      @default(0) @map("candle_count")
+  status       String                          // 'running' | 'completed' | 'partial' | 'failed'
+  errorMessage String?  @map("error_message")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("import_logs")
+}
+
+// ── Strategy versioning ───────────────────────────────────────────────────────
+
+model Strategy {
+  id          String            @id @default(cuid())
+  name        String            @unique
+  description String?
+  status      String            @default("active") // 'active' | 'archived'
+  createdAt   DateTime          @default(now()) @map("created_at")
+
+  versions    StrategyVersion[]
+
+  @@map("strategies")
+}
+
+model StrategyVersion {
+  id             String   @id @default(cuid())
+  strategyId     String   @map("strategy_id")
+  versionNumber  Int      @map("version_number")
+  settingsJson   Json     @map("settings_json")
+  isActive       Boolean  @default(false) @map("is_active")
+  isLiveApproved Boolean  @default(false) @map("is_live_approved")
+  notes          String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  strategy        Strategy                 @relation(fields: [strategyId], references: [id])
+  crossfireSetups CrossfireSetup[]
+  trades          Trade[]
+  backtestRuns    BacktestRun[]
+  fundedTests     FundedAccountTest[]
+  recommendations StrategyRecommendation[]
+
+  @@unique([strategyId, versionNumber])
+  @@map("strategy_versions")
+}
+
+// ── Crossfire setup detection ─────────────────────────────────────────────────
+
+model CrossfireSetup {
+  id                String   @id @default(cuid())
+  strategyVersionId String   @map("strategy_version_id")
+  symbol            String
+  dateUk            String   @map("date_uk")      // "YYYY-MM-DD" in UK local time
+  setupValid        Boolean  @default(true) @map("setup_valid")
+  invalidReason     String?  @map("invalid_reason")
+
+  // 1pm UK anchor candle (the trigger candle for the session)
+  setupCandleTs     DateTime @map("setup_candle_ts")
+  setupCandleOpen   Float    @map("setup_candle_open")
+  setupCandleHigh   Float    @map("setup_candle_high")
+  setupCandleLow    Float    @map("setup_candle_low")
+  setupCandleClose  Float    @map("setup_candle_close")
+
+  // Swing high anchor (green trendline start — highest high 08:00–13:00 UK)
+  hhCandleTs        DateTime @map("hh_candle_ts")
+  hhPrice           Float    @map("hh_price")
+
+  // Swing low anchor (red trendline start — lowest low 08:00–13:00 UK)
+  llCandleTs        DateTime @map("ll_candle_ts")
+  llPrice           Float    @map("ll_price")
+
+  // Trendline parameters: price = slope * (ts_ms - originTs_ms) + intercept
+  greenLineSlope     Float    @map("green_line_slope")
+  greenLineIntercept Float    @map("green_line_intercept")
+  greenLineOriginTs  DateTime @map("green_line_origin_ts")
+  redLineSlope       Float    @map("red_line_slope")
+  redLineIntercept   Float    @map("red_line_intercept")
+  redLineOriginTs    DateTime @map("red_line_origin_ts")
+
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  strategyVersion   StrategyVersion @relation(fields: [strategyVersionId], references: [id])
+  signals           Signal[]
+
+  @@unique([strategyVersionId, symbol, dateUk])
+  @@map("crossfire_setups")
+}
+
+// ── Signal detection ──────────────────────────────────────────────────────────
+
+model Signal {
+  id               String   @id @default(cuid())
+  setupId          String   @map("setup_id")
+  direction        String                        // 'buy' | 'sell'
+  signalTs         DateTime @map("signal_ts")
+  breakoutType     String   @map("breakout_type") // 'strong_body_close' | 'weak_body_close' | 'wick_break_only'
+  signalValid      Boolean  @default(true) @map("signal_valid")
+  invalidReason    String?  @map("invalid_reason")
+
+  // Signal candle OHLCV
+  candleOpen       Float    @map("candle_open")
+  candleHigh       Float    @map("candle_high")
+  candleLow        Float    @map("candle_low")
+  candleClose      Float    @map("candle_close")
+  candleVolume     Int      @map("candle_volume")
+
+  linePriceAtSignal Float   @map("line_price_at_signal")
+
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  setup            CrossfireSetup @relation(fields: [setupId], references: [id])
+  trade            Trade?
+
+  @@map("signals")
+}
+
+// ── Trade simulation ──────────────────────────────────────────────────────────
+
+model Trade {
+  id                String    @id @default(cuid())
+  signalId          String    @unique @map("signal_id")
+  strategyVersionId String    @map("strategy_version_id")
+  backtestRunId     String?   @map("backtest_run_id")
+  symbol            String
+  direction         String                        // 'buy' | 'sell'
+  entryTs           DateTime  @map("entry_ts")
+  entryPrice        Float     @map("entry_price")
+  slPrice           Float     @map("sl_price")
+  tpPrice           Float     @map("tp_price")
+  exitTs            DateTime? @map("exit_ts")
+  exitPrice         Float?    @map("exit_price")
+  result            String                        // 'win' | 'loss' | 'open'
+  profitLossR       Float?    @map("profit_loss_r")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  signal          Signal              @relation(fields: [signalId], references: [id])
+  strategyVersion StrategyVersion     @relation(fields: [strategyVersionId], references: [id])
+  backtestRun     BacktestRun?        @relation(fields: [backtestRunId], references: [id])
+  pathAnalysis    TradePathAnalysis?
+  context         TradeContext?
+
+  @@map("trades")
+}
+
+// ── Trade analytics ───────────────────────────────────────────────────────────
+
+model TradePathAnalysis {
+  id                  String   @id @default(cuid())
+  tradeId             String   @unique @map("trade_id")
+
+  mfePips             Float?   @map("mfe_pips")
+  maePips             Float?   @map("mae_pips")
+  mfeR                Float?   @map("mfe_r")
+  maeR                Float?   @map("mae_r")
+
+  reached1r           Boolean  @default(false) @map("reached_1r")
+  reached2r           Boolean  @default(false) @map("reached_2r")
+  reached3r           Boolean  @default(false) @map("reached_3r")
+
+  timeTo1rMinutes     Int?     @map("time_to_1r_minutes")
+  timeTo3rMinutes     Int?     @map("time_to_3r_minutes")
+  timeToExitMinutes   Int?     @map("time_to_exit_minutes")
+
+  breakEvenWouldHelp  Boolean  @default(false) @map("break_even_would_help")
+
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  trade               Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+
+  @@map("trade_path_analysis")
+}
+
+model TradeContext {
+  id                  String   @id @default(cuid())
+  tradeId             String   @unique @map("trade_id")
+
+  atrM5               Float?   @map("atr_m5")
+  atrM15              Float?   @map("atr_m15")
+  atrH1               Float?   @map("atr_h1")
+
+  trendM15            String?  @map("trend_m15")  // 'bullish' | 'bearish' | 'neutral'
+  trendH1             String?  @map("trend_h1")
+  trendH4             String?  @map("trend_h4")
+
+  isHighVolatility    Boolean  @default(false) @map("is_high_volatility")
+  isNearRoundNumber   Boolean  @default(false) @map("is_near_round_number")
+  marketCondition     String?  @map("market_condition") // 'trending' | 'ranging' | 'volatile'
+
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  trade               Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+
+  @@map("trade_context")
+}
+
+// ── Backtest runs ─────────────────────────────────────────────────────────────
+
+model BacktestRun {
+  id                String    @id @default(cuid())
+  strategyVersionId String    @map("strategy_version_id")
+  symbol            String
+  timeframe         String
+  fromDate          DateTime  @map("from_date")
+  toDate            DateTime  @map("to_date")
+  status            String    @default("running") // 'running' | 'completed' | 'partial' | 'failed'
+  assumptionsJson   Json?     @map("assumptions_json")
+  tradeCount        Int       @default(0) @map("trade_count")
+  winCount          Int       @default(0) @map("win_count")
+  lossCount         Int       @default(0) @map("loss_count")
+  winRate           Float?    @map("win_rate")
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime  @default(now()) @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+
+  strategyVersion    StrategyVersion     @relation(fields: [strategyVersionId], references: [id])
+  trades             Trade[]
+  analyticsSummaries AnalyticsSummary[]
+  aiReviews          AiReview[]
+  fundedTests        FundedAccountTest[]
+
+  @@map("backtest_runs")
+}
+
+// ── Analytics and AI layer ────────────────────────────────────────────────────
+
+model AnalyticsSummary {
+  id            String   @id @default(cuid())
+  backtestRunId String   @map("backtest_run_id")
+  summaryType   String   @map("summary_type")   // 'overall' | 'by_day_of_week' | 'by_entry_hour' | etc.
+  summaryJson   Json     @map("summary_json")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  backtestRun   BacktestRun @relation(fields: [backtestRunId], references: [id], onDelete: Cascade)
+
+  @@unique([backtestRunId, summaryType])
+  @@map("analytics_summaries")
+}
+
+model AiReview {
+  id                  String   @id @default(cuid())
+  backtestRunId       String   @map("backtest_run_id")
+  aiModel             String   @map("ai_model")
+  prompt              String
+  response            String
+  recommendationsJson Json?    @map("recommendations_json")
+  tokenCount          Int?     @map("token_count")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  backtestRun     BacktestRun              @relation(fields: [backtestRunId], references: [id])
+  recommendations StrategyRecommendation[]
+
+  @@map("ai_reviews")
+}
+
+model StrategyRecommendation {
+  id                   String    @id @default(cuid())
+  aiReviewId           String    @map("ai_review_id")
+  strategyVersionId    String    @map("strategy_version_id")
+  proposedSettingsJson Json      @map("proposed_settings_json")
+  rationale            String
+  expectedBenefit      String    @map("expected_benefit")
+  status               String    @default("suggested")  // 'suggested' | 'accepted' | 'rejected'
+  approvedAt           DateTime? @map("approved_at")
+  rejectedAt           DateTime? @map("rejected_at")
+  rejectionNotes       String?   @map("rejection_notes")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  aiReview        AiReview        @relation(fields: [aiReviewId], references: [id])
+  strategyVersion StrategyVersion @relation(fields: [strategyVersionId], references: [id])
+
+  @@map("strategy_recommendations")
+}
+
+model FundedAccountTest {
+  id                String   @id @default(cuid())
+  strategyVersionId String   @map("strategy_version_id")
+  backtestRunId     String   @map("backtest_run_id")
+  accountSize       Float    @map("account_size")
+  riskPercent       Float    @map("risk_percent")
+  rrRatio           Float    @map("rr_ratio")
+  dailyLossLimit    Float    @map("daily_loss_limit")
+  maxDrawdownLimit  Float    @map("max_drawdown_limit")
+  passed            Boolean
+  peakBalance       Float    @map("peak_balance")
+  worstDrawdown     Float    @map("worst_drawdown")
+  dailyBreachCount  Int      @default(0) @map("daily_breach_count")
+  failureReason     String?  @map("failure_reason")
+  equityCurveJson   Json?    @map("equity_curve_json")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  strategyVersion StrategyVersion @relation(fields: [strategyVersionId], references: [id])
+  backtestRun     BacktestRun     @relation(fields: [backtestRunId], references: [id])
+
+  @@map("funded_account_tests")
+}

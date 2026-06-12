@@ -1,5 +1,5 @@
-import { db } from './db'
-import { fetchAllCandles, type RawOandaCandle } from './oanda-client'
+import { db } from './db.js'
+import { fetchAllCandles, type RawOandaCandle } from './oanda-client.js'
 
 export interface IngestResult {
   symbol:    string

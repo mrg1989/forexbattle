@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { ingestCandles } from '../_lib/candle-ingestion'
+import { ingestCandles } from '../_lib/candle-ingestion.js'
 
 const ALLOWED_SYMBOLS    = ['EUR_USD', 'GBP_USD'] as const
 const ALLOWED_TIMEFRAMES = ['M5', 'M15'] as const

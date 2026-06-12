@@ -1,5 +1,4 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
-import { useGameStore } from '../store/gameStore'
 import { useOandaStream } from '../hooks/useOandaStream'
 import CandlestickChart from '../components/chart/CandlestickChart'
 import AiAnalysisPanel from '../components/AiAnalysisPanel'
@@ -63,8 +62,6 @@ function StatChip({ label, value, color }: { label: string; value: string; color
 }
 
 export default function ChartSandbox() {
-  const { goTo, pushLiveTick, setLiveBasePrice } = useGameStore()
-
   const [pair,       setPair]       = useState('EUR/USD')
   const [tfIdx,      setTfIdx]      = useState(1)
   const [candles,    setCandles]    = useState<Candle[]>([])
@@ -144,7 +141,7 @@ export default function ChartSandbox() {
         const live: Candle = { timestamp: pStart, open: last.close, high: last.close, low: last.close, close: last.close, volume: 0 }
         liveCandleRef.current  = live
         candleStartRef.current = pStart
-        setCandles(raw); setLiveCandle(live); setLiveBasePrice(last.close); setLoading(false)
+        setCandles(raw); setLiveCandle(live); setLoading(false)
         histLoadingRef.current = false
       })
       .catch(e => { setFetchErr(e.message); setLoading(false) })
@@ -180,7 +177,7 @@ export default function ChartSandbox() {
     const lc = liveCandleRef.current; if (!lc) return
     const upd: Candle = { ...lc, close: price, high: Math.max(lc.high, price), low: Math.min(lc.low, price), volume: lc.volume + 1 }
     liveCandleRef.current = upd
-    setLiveCandle({ ...upd }); pushLiveTick(price)
+    setLiveCandle({ ...upd })
     setTickCount(n => n + 1); setFirstPrice(p => p ?? price)
 
     // Live signal evaluation — only when AI strategy mode is on
@@ -199,7 +196,7 @@ export default function ChartSandbox() {
         }).catch(() => { /* non-critical */ })
       }
     }
-  }, [pushLiveTick, pair])
+  }, [pair])
 
   const { status: streamStatus } = useOandaStream(pair, handleTick)
   const isLive = streamStatus === 'connected'
@@ -360,15 +357,6 @@ export default function ChartSandbox() {
       <div className="flex-shrink-0 flex items-center gap-2 px-3 h-12"
            style={{ background: 'rgba(8,8,24,0.97)', borderBottom: '1px solid rgba(255,255,255,0.07)', zIndex: 30 }}
            ref={menuRef}>
-
-        {/* Home */}
-        <button onClick={() => goTo('landing')}
-                className="text-xs font-medium px-2.5 py-1.5 rounded-lg flex-shrink-0 transition-colors"
-                style={{ background: 'rgba(255,255,255,0.05)', color: 'rgba(241,241,255,0.5)' }}>
-          ← Home
-        </button>
-
-        <div className="w-px h-4 flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }} />
 
         {/* ── Instrument dropdown ── */}
         <div className="relative flex-shrink-0">

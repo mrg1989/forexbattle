@@ -1,4 +1,5 @@
 import type { Candle } from '../types'
+import { toUKHour, toUKDateString } from '../lib/time'
 
 export interface LineOverlay {
   x1Ms:         number   // start timestamp (ms)
@@ -50,19 +51,19 @@ function crossfireForDay(candles: Candle[], onePmIdx: number, _tfMs: number, use
   const onePmCandle = candles[onePmIdx]
   const onePmMs     = onePmCandle.timestamp
   const threePmMs   = onePmMs + 2 * 3_600_000
-  const onePmDay    = new Date(onePmMs).toDateString()
+  const onePmDay    = toUKDateString(onePmMs)
 
-  // ── Find London open (8am) on same calendar day ───────────────────────────
+  // ── Find London open (8am UK) on same UK calendar day ────────────────────
   let londonOpenMs = -Infinity
   for (let i = onePmIdx; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.toDateString() !== onePmDay) break
-    if (d.getHours() === 8 && d.getMinutes() === 0) { londonOpenMs = candles[i].timestamp; break }
+    const ts = candles[i].timestamp
+    if (toUKDateString(ts) !== onePmDay) break
+    if (toUKHour(ts) === 8 && new Date(ts).getMinutes() === 0) { londonOpenMs = candles[i].timestamp; break }
   }
   if (londonOpenMs === -Infinity) {
     for (let i = onePmIdx; i >= 0; i--) {
-      const d = new Date(candles[i].timestamp)
-      if (d.toDateString() !== onePmDay) break
+      const ts = candles[i].timestamp
+      if (toUKDateString(ts) !== onePmDay) break
       londonOpenMs = candles[i].timestamp
     }
   }
@@ -72,7 +73,7 @@ function crossfireForDay(candles: Candle[], onePmIdx: number, _tfMs: number, use
   for (let i = 0; i < onePmIdx; i++) {
     const c = candles[i]
     if (c.timestamp < londonOpenMs) continue
-    if (new Date(c.timestamp).toDateString() !== onePmDay) continue
+    if (toUKDateString(c.timestamp) !== onePmDay) continue
     session.push(c)
   }
   if (session.length < 3) return []
@@ -198,13 +199,13 @@ export function getH1TrendAt(h1Map: Map<number, number>, targetTs: number): -1 |
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/** Crossfire for the most recent 1pm candle in the data. */
+/** Crossfire for the most recent 1pm UK candle in the data. */
 export function computeCrossfire(candles: Candle[]): LineOverlay[] {
   if (candles.length < 5) return []
   const tfMs = candles.length > 1 ? candles[1].timestamp - candles[0].timestamp : 900_000
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() === 13 && d.getMinutes() === 0) {
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) === 13 && new Date(ts).getMinutes() === 0) {
       return crossfireForDay(candles, i, tfMs)
     }
   }
@@ -212,7 +213,7 @@ export function computeCrossfire(candles: Candle[]): LineOverlay[] {
 }
 
 /**
- * Crossfire for the most recent 1pm candle + entry/SL/TP projection using
+ * Crossfire for the most recent 1pm UK candle + entry/SL/TP projection using
  * current settings. Always draws the risk levels on the live chart so changing
  * SL mode or R:R gives instant visual feedback without needing backtest mode.
  */
@@ -223,11 +224,11 @@ export function computeCrossfireWithLevels(
   if (candles.length < 5) return []
   const tfMs = candles.length > 1 ? candles[1].timestamp - candles[0].timestamp : 900_000
 
-  // Find most recent 1pm candle
+  // Find most recent 1pm UK candle
   let onePmIdx = -1
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() === 13 && d.getMinutes() === 0) { onePmIdx = i; break }
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) === 13 && new Date(ts).getMinutes() === 0) { onePmIdx = i; break }
   }
   if (onePmIdx === -1) return []
 
@@ -237,7 +238,7 @@ export function computeCrossfireWithLevels(
 }
 
 /**
- * Crossfire for EVERY 1pm candle in the data (backtest mode).
+ * Crossfire for EVERY 1pm UK candle in the data (backtest mode).
  * Each trading day gets its own zone + trendlines.
  * Capped at the most recent 60 sessions to prevent rendering overload.
  */
@@ -246,11 +247,12 @@ export function computeCrossfireAll(candles: Candle[], useBodyLines = false): Li
   const tfMs = candles.length > 1 ? candles[1].timestamp - candles[0].timestamp : 900_000
   const result: LineOverlay[] = []
   const seenDays = new Set<string>()
+
   const onePmIndices: number[] = []
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() !== 13 || d.getMinutes() !== 0) continue
-    const dayKey = d.toDateString()
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) !== 13 || new Date(ts).getMinutes() !== 0) continue
+    const dayKey = toUKDateString(ts)
     if (seenDays.has(dayKey)) continue
     seenDays.add(dayKey)
     onePmIndices.push(i)
@@ -469,9 +471,9 @@ export function runCrossfireBacktest(candles: Candle[], settings: BacktestSettin
 
   const onePmIndices: number[] = []
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() !== 13 || d.getMinutes() !== 0) continue
-    const dayKey = d.toDateString()
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) !== 13 || new Date(ts).getMinutes() !== 0) continue
+    const dayKey = toUKDateString(ts)
     if (seenDays.has(dayKey)) continue
     seenDays.add(dayKey)
     onePmIndices.push(i)
@@ -488,19 +490,6 @@ export function runCrossfireBacktest(candles: Candle[], settings: BacktestSettin
 }
 
 // ── Crossfire AI Strategy ─────────────────────────────────────────────────────
-//
-// Same base as Crossfire but with data-derived entry filters applied:
-//   1. No entries in the first 15 minutes of the session (skip 1:10pm window)
-//      — the 1:10pm candle historically has ~10% win rate vs 38% for ≥1:15pm.
-//   2. Wick/body ratio ≤ 0.5 — entry candle body must be ≥ 2× total wick.
-//      This selects strong directional closes and rejects indecision candles.
-//   3. Entry candle body ≥ minBodyPips (default 1.5 pips) — filters doji-style
-//      candles where the "breakout" is just noise.
-//   4. Dynamic SL capped at maxSlPips (default 20 pips) — prevents catastrophic
-//      outlier losses from oversized dynamic stop placements.
-//
-// All rules apply uniformly to every trade — no session-specific tuning.
-// ─────────────────────────────────────────────────────────────────────────────
 
 export interface CrossfireAiSettings {
   rrRatio:               number   // R:R target
@@ -516,30 +505,27 @@ export interface CrossfireAiSettings {
   requireCounterTrend?:  boolean  // only take trades COUNTER to the H1 trend (reversal mode)
   requirePrevAligned?:   boolean  // require previous candle to move in trade direction
   filterBuysCounterH1?:  boolean  // buys only when H1 is bearish (counter-trend buys)
-                                   // data: H1=+1 buys = 8% WR vs H1=-1 buys = 33% WR
   tradeDirection?:       'both' | 'buy' | 'sell'  // restrict to one direction
   skipBearishDrift?:     boolean  // skip days where 8am→1pm trend is between -20 and -6 pips
-                                   // data: that zone = 9% WR (1/11); all others ≥ 45% WR
   requirePrevDayWin?:    boolean  // only trade after a winning session
-                                   // data: prevWin = 63% WR vs prevLoss = 44% WR
 }
 
 export const CROSSFIRE_AI_DEFAULTS: CrossfireAiSettings = {
-  rrRatio:               3,       // reverted: 1:3 gives more trade hits for data gathering
+  rrRatio:               3,
   pipSize:               0.0001,
   minBodyPips:           1.5,
-  maxBodyPips:           20,     // filters out news/spike candles (109-pip body in dataset was NFP)
+  maxBodyPips:           20,
   maxWickRatio:          0.10,
   minMinutes:            15,
-  maxMinutes:            195,     // data (n=445): 15–195min = 43% WR; >195min = 26% WR
+  maxMinutes:            195,
   maxSlPips:             20,
   useBodyLines:          false,
   requireTrendAlignment: false,
   requireCounterTrend:   false,
-  requirePrevAligned:    true,    // data: 39% WR vs 22% WR without
-  filterBuysCounterH1:   true,    // data: H1=+1 buys = 8% WR, H1=-1 buys = 33% WR
+  requirePrevAligned:    true,
+  filterBuysCounterH1:   true,
   tradeDirection:        'both',
-  skipBearishDrift:      true,    // data: bearish drift -20→-6 pips = 9% WR (1/11), skip it
+  skipBearishDrift:      true,
 }
 
 function backtestDayAi(
@@ -555,7 +541,6 @@ function backtestDayAi(
           tradeDirection = 'both', maxMinutes, skipBearishDrift = false,
           requirePrevDayWin = false } = settings
 
-  // Require previous session to have been a win before taking today's trade
   if (requirePrevDayWin && prevResult !== 'win') return { trades: [], hadRawSetup: false }
   const dayOverlays = crossfireForDay(candles, onePmIdx, tfMs, useBodyLines)
   const greenLine   = dayOverlays.find(o => o.color === '#22C55E' && !o.fullHeight && !o.fillZone)
@@ -565,18 +550,18 @@ function backtestDayAi(
   const onePmMs     = candles[onePmIdx].timestamp
   const threePmMs   = onePmMs + 2 * 3_600_000
   const sessionDate = new Date(onePmMs).toDateString()
-  let hadRawSetup   = false   // tracks if Crossfire fired at all (before AI filters)
+  let hadRawSetup   = false
 
-  // Pre-session trend filter: compute 8am→1pm net move and skip the "bearish drift" zone
-  // Data: -20 to -6 pip drift = 9% WR (1/11 trades). All other zones ≥ 45% WR.
   if (skipBearishDrift) {
-    const d         = new Date(onePmMs)
-    const eightAmMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 8, 0, 0).getTime()
+    const ukDay = toUKDateString(onePmMs)
     let eightAmOpen: number | null = null
     let onePmClose: number | null = null
     for (let k = 0; k < candles.length; k++) {
       const c = candles[k]
-      if (c.timestamp === eightAmMs && eightAmOpen === null) eightAmOpen = c.open
+      if (toUKHour(c.timestamp) === 8 && new Date(c.timestamp).getMinutes() === 0 &&
+          toUKDateString(c.timestamp) === ukDay && eightAmOpen === null) {
+        eightAmOpen = c.open
+      }
       if (c.timestamp === onePmMs) { onePmClose = c.close; break }
     }
     if (eightAmOpen !== null && onePmClose !== null) {
@@ -589,69 +574,51 @@ function backtestDayAi(
     const c = candles[i]
     if (c.timestamp >= threePmMs) break
 
-    // Filter 1: time — wait at least minMinutes after 1pm; stop after maxMinutes
     const minsSince1pm = (c.timestamp - onePmMs) / 60_000
     if (minsSince1pm < minMinutes) continue
-    if (maxMinutes !== undefined && minsSince1pm > maxMinutes) break  // past window, done
+    if (maxMinutes !== undefined && minsSince1pm > maxMinutes) break
 
     const gl = linePriceAt(greenLine.x1Ms, greenLine.y1, greenLine.x2Ms, greenLine.y2, c.timestamp)
     const rl = linePriceAt(redLine.x1Ms,   redLine.y1,   redLine.x2Ms,   redLine.y2,   c.timestamp)
 
-    // Basic direction check
     const direction: 'buy' | 'sell' | null =
       c.close > gl ? 'buy' : c.close < rl ? 'sell' : null
     if (!direction) continue
 
-    // A raw Crossfire setup exists on this day
     hadRawSetup = true
 
-    // Direction restriction — only take one side
     if (tradeDirection !== 'both' && direction !== tradeDirection) continue
 
-    // Filter: only buy when H1 is bearish — data shows H1=+1 buys have 8% WR
     if (filterBuysCounterH1 && direction === 'buy') {
       const h1Trend = getH1TrendAt(h1Map, c.timestamp)
       if (h1Trend === 1) continue
     }
 
-    // Filter: H1 trend alignment — skip trades that go against the hourly trend
     if (requireTrendAlignment) {
       const h1Trend = getH1TrendAt(h1Map, c.timestamp)
       if (h1Trend !== 0 && h1Trend !== (direction === 'buy' ? 1 : -1)) continue
     }
 
-    // Filter: counter-trend mode — only trade AGAINST the hourly trend (reversal entries)
-    // Data: buys WITH H1=+1 had 0% WR; buys AGAINST H1=-1 had 25% WR
     if (requireCounterTrend) {
       const h1Trend = getH1TrendAt(h1Map, c.timestamp)
       if (h1Trend !== 0 && h1Trend === (direction === 'buy' ? 1 : -1)) continue
     }
 
-    // Filter 2: wick/body ratio
     const bodyPips  = Math.abs(c.close - c.open) / pipSize
     const rangePips = (c.high - c.low) / pipSize
     const wickPips  = Math.max(0, rangePips - bodyPips)
     const wickRatio = bodyPips > 0 ? wickPips / bodyPips : 999
     if (wickRatio > maxWickRatio) continue
-
-    // Filter 3: minimum body size
     if (bodyPips < minBodyPips) continue
-
-    // Filter 4: maximum body size — large bodies signal overextended/low-quality breakouts
     if (maxBodyPips !== undefined && maxBodyPips > 0 && bodyPips > maxBodyPips) continue
 
-    // Filter 5: previous candle must move in the same direction as the trade
-    // Data: prevAligned=1 → 35% WR vs prevAligned=0 → 7% WR
     if (requirePrevAligned && i > 0) {
       const prevC  = candles[i - 1]
       const prevUp = prevC.close > prevC.open
       if (!((direction === 'buy' && prevUp) || (direction === 'sell' && !prevUp))) continue
     }
 
-    // Build trade
     const entry = c.close
-
-    // Dynamic SL: entry-to-line distance mirrored, capped at maxSlPips
     let slPrice: number
     if (direction === 'buy') {
       const dist = Math.max(entry - rl, pipSize)
@@ -661,10 +628,8 @@ function backtestDayAi(
       slPrice = gl + dist
     }
 
-    // Filter 4: cap SL at maxSlPips
     const rawSlPips = Math.abs(entry - slPrice) / pipSize
     if (rawSlPips > maxSlPips) {
-      // Shrink SL to cap but keep it on the correct side
       slPrice = direction === 'buy'
         ? entry - maxSlPips * pipSize
         : entry + maxSlPips * pipSize
@@ -719,9 +684,9 @@ export function runCrossfireAiBacktest(
 
   const onePmIndices: number[] = []
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() !== 13 || d.getMinutes() !== 0) continue
-    const dayKey = d.toDateString()
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) !== 13 || new Date(ts).getMinutes() !== 0) continue
+    const dayKey = toUKDateString(ts)
     if (seenDays.has(dayKey)) continue
     seenDays.add(dayKey)
     onePmIndices.push(i)
@@ -732,7 +697,7 @@ export function runCrossfireAiBacktest(
     if (dayTrades.length > 0) {
       trades.push(...dayTrades)
     } else if (hadRawSetup) {
-      filteredSetups++   // Crossfire fired but all filters rejected the entry
+      filteredSetups++
     }
   }
 
@@ -744,16 +709,13 @@ export function runCrossfireAiBacktest(
 }
 
 // ── Live signal evaluator ─────────────────────────────────────────────────────
-// Called on every live tick. Returns a signal if the current 5m candle
-// just crossed the Crossfire line AND all AI filters pass.
-// Returns null if no signal (most of the time).
 
 export interface LiveSignal {
   pair:        string
   direction:   'buy' | 'sell'
-  entry:       number   // candle close price
-  sl:          number   // stop loss price
-  tp:          number   // take profit price
+  entry:       number
+  sl:          number
+  tp:          number
   slPips:      number
   tpPips:      number
   timestamp:   number
@@ -774,11 +736,10 @@ export function evaluateLiveSignal(
           requirePrevAligned = false, requireTrendAlignment = false,
           requireCounterTrend = false } = settings
 
-  // Find today's 1pm candle
   let onePmIdx = -1
   for (let i = candles.length - 1; i >= 0; i--) {
-    const d = new Date(candles[i].timestamp)
-    if (d.getHours() === 13 && d.getMinutes() === 0) { onePmIdx = i; break }
+    const ts = candles[i].timestamp
+    if (toUKHour(ts) === 13 && new Date(ts).getMinutes() === 0) { onePmIdx = i; break }
   }
   if (onePmIdx === -1) return null
 
@@ -786,21 +747,21 @@ export function evaluateLiveSignal(
   const threePmMs = onePmMs + 2 * 3_600_000
   const nowMs    = liveCandle.timestamp
 
-  // Only fire during 1pm–3pm window
   if (nowMs < onePmMs || nowMs >= threePmMs) return null
 
   const minsSince1pm = (nowMs - onePmMs) / 60_000
   if (minsSince1pm < minMinutes) return null
   if (maxMinutes !== undefined && minsSince1pm > maxMinutes) return null
 
-  // Skip bearish drift zone
   if (skipBearishDrift) {
-    const d = new Date(onePmMs)
-    const eightAmMs = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 8, 0, 0).getTime()
+    const ukDay = toUKDateString(onePmMs)
     let eightAmOpen: number | null = null
     let onePmClose: number | null = null
     for (const c of candles) {
-      if (c.timestamp === eightAmMs && eightAmOpen === null) eightAmOpen = c.open
+      if (toUKHour(c.timestamp) === 8 && new Date(c.timestamp).getMinutes() === 0 &&
+          toUKDateString(c.timestamp) === ukDay && eightAmOpen === null) {
+        eightAmOpen = c.open
+      }
       if (c.timestamp === onePmMs) { onePmClose = c.close; break }
     }
     if (eightAmOpen !== null && onePmClose !== null) {
@@ -809,7 +770,6 @@ export function evaluateLiveSignal(
     }
   }
 
-  // Get today's Crossfire lines
   const dayOverlays = crossfireForDay(candles, onePmIdx, tfMs, useBodyLines)
   const greenLine   = dayOverlays.find(o => o.color === '#22C55E' && !o.fullHeight && !o.fillZone)
   const redLine     = dayOverlays.find(o => o.color === '#EF4444' && !o.fullHeight && !o.fillZone)
@@ -825,7 +785,6 @@ export function evaluateLiveSignal(
 
   if (tradeDirection !== 'both' && direction !== tradeDirection) return null
 
-  // Candle quality filters
   const bodyPips  = Math.abs(c.close - c.open) / pipSize
   const rangePips = (c.high - c.low) / pipSize
   const wickPips  = Math.max(0, rangePips - bodyPips)
@@ -834,7 +793,6 @@ export function evaluateLiveSignal(
   if (bodyPips < minBodyPips) return null
   if (maxBodyPips !== undefined && maxBodyPips > 0 && bodyPips > maxBodyPips) return null
 
-  // H1 filters
   const h1Map = buildH1Closes(candles)
   if (filterBuysCounterH1 && direction === 'buy') {
     if (getH1TrendAt(h1Map, c.timestamp) === 1) return null
@@ -848,14 +806,12 @@ export function evaluateLiveSignal(
     if (h1 !== 0 && h1 === (direction === 'buy' ? 1 : -1)) return null
   }
 
-  // Previous candle alignment
   if (requirePrevAligned) {
     const prevC = candles[candles.length - 1]
     const prevUp = prevC.close > prevC.open
     if (!((direction === 'buy' && prevUp) || (direction === 'sell' && !prevUp))) return null
   }
 
-  // Build SL/TP
   const entry = c.close
   let slPrice: number
   if (direction === 'buy') {
@@ -880,4 +836,3 @@ export function evaluateLiveSignal(
   return { pair, direction, entry, sl: slPrice, tp: tpPrice,
            slPips: slPipsActual, tpPips: tpPipsActual, timestamp: c.timestamp }
 }
-

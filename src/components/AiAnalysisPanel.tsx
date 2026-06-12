@@ -126,7 +126,10 @@ export default function AiAnalysisPanel({
 
   // ── Equity curve ────────────────────────────────────────────────────────────
   const equityCurve = useMemo(() => {
-    const allClosed = trades.filter(t => t.result === 'win' || t.result === 'loss')
+    const allClosed = trades
+      .filter(t => t.result === 'win' || t.result === 'loss')
+      .slice()
+      .sort((a, b) => a.entryTs - b.entryTs)
     const startTs = startDate ? new Date(startDate).getTime() : 0
     const closed = startDate ? allClosed.filter(t => new Date(t.sessionDate).getTime() >= startTs) : allClosed
     let balance = startBalance

@@ -20,12 +20,19 @@
 #property strict
 
 //--- Input parameters
-input string   SignalURL    = "https://forexbattle.vercel.app/api/signal";
-input string   SignalKey    = "";          // Set to your SIGNAL_KEY env var value
-input double   RiskPercent  = 1.0;        // % of account balance to risk per trade
-input int      PollSeconds  = 10;         // How often to check for a new signal
-input int      MagicNumber  = 20260113;   // Unique ID for this EA's trades
-input bool     EnableTrading = true;      // Master on/off switch
+input string   SignalURL        = "https://forexbattle.vercel.app/api/signal";
+input string   SignalKey        = "";          // Set to your SIGNAL_KEY env var value
+input double   RiskPercent      = 1.0;        // % of account balance to risk per trade
+input int      PollSeconds      = 10;         // How often to check for a new signal
+input int      MagicNumber      = 20260113;   // Unique ID for this EA's trades
+input bool     EnableTrading    = true;       // Master on/off switch
+
+//--- Trailing stop inputs (all off by default)
+input bool     EnableTrailing   = false;  // Enable trailing stop management
+input double   BreakevenAtR     = 1.0;    // Move SL to breakeven when X R in profit (0 = off)
+input int      BreakevenBuffer  = 2;      // Extra pips past entry for breakeven SL
+input double   TrailStartR      = 2.0;    // Begin trailing when X R in profit (0 = off)
+input int      TrailStepPips    = 5;      // Trail step in pips (SL stays this far behind price)
 
 //--- Global state
 datetime g_lastPollTime = 0;
@@ -48,6 +55,7 @@ void OnTimer()
 {
    if (!EnableTrading) return;
    PollAndTrade();
+   ManagePositions();
 }
 
 //+------------------------------------------------------------------+
@@ -220,13 +228,99 @@ bool PlaceTrade(ENUM_ORDER_TYPE type, double slPips, double tpPips, double lots)
    req.sl           = sl;
    req.tp           = tp;
    req.magic        = MagicNumber;
-   req.comment      = "Crossfire";
+   req.comment      = StringFormat("Crossfire:%.1f", slPips);  // encodes original SL for trailing logic
    req.type_filling = filling;
 
    bool ok = OrderSend(req, res);
    if (!ok || res.retcode != TRADE_RETCODE_DONE)
       Print("[Crossfire EA] OrderSend failed: retcode=", res.retcode, " | ", res.comment);
    return ok && res.retcode == TRADE_RETCODE_DONE;
+}
+
+//+------------------------------------------------------------------+
+// Trailing stop manager — called every timer tick
+void ManagePositions()
+{
+   if (!EnableTrailing) return;
+
+   double point   = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   int    digits  = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   double pipSize = point * ((digits == 3 || digits == 5) ? 10 : 1);
+   int    stopsLv = (int)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = stopsLv * point + point;
+
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(ticket))                          continue;
+      if ((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)  continue;
+      if (PositionGetString(POSITION_SYMBOL) != Symbol())          continue;
+
+      // Original SL pips are encoded in comment as "Crossfire:11.5"
+      string comment   = PositionGetString(POSITION_COMMENT);
+      int    sep       = StringFind(comment, ":");
+      if (sep < 0) continue;
+      double origSlPips = StringToDouble(StringSubstr(comment, sep + 1));
+      if (origSlPips <= 0) continue;
+
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+
+      double currentPrice = (posType == POSITION_TYPE_BUY)
+                            ? SymbolInfoDouble(Symbol(), SYMBOL_BID)
+                            : SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+
+      double rUnit   = origSlPips * pipSize;  // 1R in price distance
+      double profitR = (posType == POSITION_TYPE_BUY)
+                       ? (currentPrice - entry) / rUnit
+                       : (entry - currentPrice) / rUnit;
+
+      double newSl = sl;
+
+      // ── Step 1: Breakeven ──────────────────────────────────────────
+      if (BreakevenAtR > 0 && profitR >= BreakevenAtR)
+      {
+         double beSl = (posType == POSITION_TYPE_BUY)
+                       ? entry + BreakevenBuffer * pipSize
+                       : entry - BreakevenBuffer * pipSize;
+         beSl = NormalizeDouble(beSl, digits);
+         if (posType == POSITION_TYPE_BUY  && beSl > newSl) newSl = beSl;
+         if (posType == POSITION_TYPE_SELL && beSl < newSl) newSl = beSl;
+      }
+
+      // ── Step 2: Trail ─────────────────────────────────────────────
+      if (TrailStartR > 0 && profitR >= TrailStartR)
+      {
+         double trailSl = (posType == POSITION_TYPE_BUY)
+                          ? currentPrice - TrailStepPips * pipSize
+                          : currentPrice + TrailStepPips * pipSize;
+         trailSl = NormalizeDouble(trailSl, digits);
+         if (posType == POSITION_TYPE_BUY  && trailSl > newSl) newSl = trailSl;
+         if (posType == POSITION_TYPE_SELL && trailSl < newSl) newSl = trailSl;
+      }
+
+      if (newSl == sl) continue;  // nothing to update
+
+      // Enforce broker minimum stop distance from current price
+      if (posType == POSITION_TYPE_BUY  && (currentPrice - newSl) < minDist) continue;
+      if (posType == POSITION_TYPE_SELL && (newSl - currentPrice) < minDist) continue;
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+      req.action   = TRADE_ACTION_SLTP;
+      req.symbol   = Symbol();
+      req.position = ticket;
+      req.sl       = newSl;
+      req.tp       = tp;
+
+      bool ok = OrderSend(req, res);
+      if (ok && res.retcode == TRADE_RETCODE_DONE)
+         Print("[Crossfire EA] SL moved to ", newSl, " at ", profitR, "R profit");
+      else
+         Print("[Crossfire EA] SL move failed: retcode=", res.retcode);
+   }
 }
 
 //+------------------------------------------------------------------+

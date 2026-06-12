@@ -12,16 +12,18 @@
  * (Node 18+, V8, Vercel serverless). No third-party library required.
  */
 
+const _ukFmt = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/London',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+
 function getUKParts(tsMs: number) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/London',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date(tsMs))
+  const parts = _ukFmt.formatToParts(new Date(tsMs))
 
   const get = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find(p => p.type === type)?.value ?? '00'

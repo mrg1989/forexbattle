@@ -3,10 +3,10 @@ import { useOandaStream } from '../hooks/useOandaStream'
 import CandlestickChart from '../components/chart/CandlestickChart'
 import AiAnalysisPanel from '../components/AiAnalysisPanel'
 import { computeCrossfireWithLevels, computeCrossfireAll, runCrossfireBacktest, runCrossfireAiBacktest, evaluateLiveSignal } from '../utils/strategies'
-import type { BacktestStats, BacktestTrade, CrossfireAiSettings, LiveSignal } from '../utils/strategies'
+import type { BacktestStats, BacktestTrade, BacktestResult, CrossfireAiSettings, LiveSignal } from '../utils/strategies'
 import { CROSSFIRE_AI_DEFAULTS } from '../utils/strategies'
 import { runSmcBacktest, SMC_DEFAULTS } from '../utils/smcStrategy'
-import type { SmcSettings } from '../utils/smcStrategy'
+import type { SmcSettings, SmcBacktestResult } from '../utils/smcStrategy'
 import type { Candle } from '../types'
 
 const TIMEFRAMES = [
@@ -90,6 +90,9 @@ export default function ChartSandbox() {
   const [deepCandles,     setDeepCandles]     = useState<Candle[]>([])
   const [deepLoading,     setDeepLoading]     = useState(false)
   const [deepProgress,    setDeepProgress]    = useState(0)
+  const [deepAiResult,    setDeepAiResult]    = useState<BacktestResult | null>(null)
+  const [deepSmcResult,   setDeepSmcResult]   = useState<SmcBacktestResult | null>(null)
+  const [deepComputing,   setDeepComputing]   = useState(false)
   const [startingAccount, setStartingAccount] = useState(1000)
   // SMC Strategy mode
   const [smcMode,         setSmcMode]         = useState(false)
@@ -271,7 +274,34 @@ export default function ChartSandbox() {
   useEffect(() => { aiSettingsRef.current = aiSettings },     [aiSettings])
 
   // Reset deep candles when pair or timeframe changes
-  useEffect(() => { setDeepCandles([]); setDeepProgress(0) }, [pair, tfIdx])
+  useEffect(() => {
+    setDeepCandles([]); setDeepProgress(0)
+    setDeepAiResult(null); setDeepSmcResult(null); setDeepComputing(false)
+  }, [pair, tfIdx])
+
+  // Deep AI backtest — deferred off the render path so the browser doesn't block/crash.
+  // Runs once after deepCandles loads; result cached in deepAiResult state.
+  useEffect(() => {
+    if (deepCandles.length === 0 || !aiStrategyMode) { setDeepAiResult(null); return }
+    const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
+    const s = { ...aiSettings, pipSize: pipSz }
+    setDeepComputing(true)
+    const id = setTimeout(() => {
+      setDeepAiResult(runCrossfireAiBacktest(deepCandles, s))
+      setDeepComputing(false)
+    }, 0)
+    return () => clearTimeout(id)
+  }, [deepCandles, aiStrategyMode, aiSettings, pair])
+
+  // Deep SMC backtest — same deferred pattern
+  useEffect(() => {
+    if (deepCandles.length === 0 || !smcMode) { setDeepSmcResult(null); return }
+    const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
+    const id = setTimeout(() => {
+      setDeepSmcResult(runSmcBacktest(deepCandles, { ...smcSettings, pipSize: pipSz }))
+    }, 0)
+    return () => clearTimeout(id)
+  }, [deepCandles, smcMode, smcSettings, pair])
 
   // AI Strategy backtest — runs whenever aiStrategyMode is on.
   // NOTE: stats & trades are derived directly from the memo, NOT via setState.
@@ -284,15 +314,14 @@ export default function ChartSandbox() {
     return runCrossfireAiBacktest(candles, s).overlays
   }, [aiStrategyMode, candles, aiSettings, pair])
 
-  // Stats and trades use deep candles when loaded (full history), otherwise chart candles
+  // Stats and trades: use cached deep result when available, else visible candles only
   const { aiStats, aiTrades } = useMemo(() => {
     if (!aiStrategyMode) return { aiStats: null as BacktestStats | null, aiTrades: [] as BacktestTrade[] }
+    if (deepAiResult)    return { aiStats: deepAiResult.stats, aiTrades: deepAiResult.trades }
     const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
-    const s = { ...aiSettings, pipSize: pipSz }
-    const src = deepCandles.length > 0 ? deepCandles : candles
-    const r = runCrossfireAiBacktest(src, s)
+    const r = runCrossfireAiBacktest(candles, { ...aiSettings, pipSize: pipSz })
     return { aiStats: r.stats, aiTrades: r.trades }
-  }, [aiStrategyMode, deepCandles, candles, aiSettings, pair])
+  }, [aiStrategyMode, deepAiResult, candles, aiSettings, pair])
 
   // Compounding calculator — 1% fixed-fractional risk, compounded on each closed trade
   const compounding = useMemo(() => {
@@ -326,11 +355,11 @@ export default function ChartSandbox() {
 
   const { smcStats, smcTrades } = useMemo(() => {
     if (!smcMode) return { smcStats: null, smcTrades: [] }
+    if (deepSmcResult) return { smcStats: deepSmcResult.stats, smcTrades: deepSmcResult.trades }
     const pipSz = pair.includes('JPY') || pair.includes('XAU') ? 0.01 : 0.0001
-    const src = deepCandles.length > 0 ? deepCandles : candles
-    const r = runSmcBacktest(src, { ...smcSettings, pipSize: pipSz })
+    const r = runSmcBacktest(candles, { ...smcSettings, pipSize: pipSz })
     return { smcStats: r.stats, smcTrades: r.trades }
-  }, [smcMode, deepCandles, candles, smcSettings, pair])
+  }, [smcMode, deepSmcResult, candles, smcSettings, pair])
 
   // Merge overlays: AI strategy overlays replace crossfire ones when active
   const allOverlays = smcMode ? smcOverlays : aiStrategyMode ? aiOverlays : chartOverlays
@@ -1029,18 +1058,20 @@ export default function ChartSandbox() {
                   ✦ AI Analysis
                 </button>                <button
                   onClick={handleDeepFetch}
-                  disabled={deepLoading}
+                  disabled={deepLoading || deepComputing}
                   className="px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all"
                   style={{
-                    background: deepLoading ? 'rgba(245,158,11,0.08)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.12)' : 'rgba(245,158,11,0.12)',
-                    border: `1px solid ${deepLoading ? 'rgba(245,158,11,0.2)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.35)' : 'rgba(245,158,11,0.35)'}`,
-                    color: deepLoading ? 'rgba(245,158,11,0.5)' : deepCandles.length > 0 ? '#4ADE80' : '#F59E0B',
-                    cursor: deepLoading ? 'default' : 'pointer',
+                    background: (deepLoading || deepComputing) ? 'rgba(245,158,11,0.08)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.12)' : 'rgba(245,158,11,0.12)',
+                    border: `1px solid ${(deepLoading || deepComputing) ? 'rgba(245,158,11,0.2)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.35)' : 'rgba(245,158,11,0.35)'}`,
+                    color: (deepLoading || deepComputing) ? 'rgba(245,158,11,0.5)' : deepCandles.length > 0 ? '#4ADE80' : '#F59E0B',
+                    cursor: (deepLoading || deepComputing) ? 'default' : 'pointer',
                   }}>
                   {deepLoading
                     ? `⧖ Loading ${deepProgress}%…`
+                    : deepComputing
+                    ? '⧖ Analysing…'
                     : deepCandles.length > 0
-                      ? `✓ ${aiStats.sessionsScanned} days loaded`
+                      ? `✓ ${aiStats?.sessionsScanned ?? 0} days loaded`
                       : '⧖ Load Full History'}
                 </button>              </div>
             </>
@@ -1122,15 +1153,15 @@ export default function ChartSandbox() {
                 </button>
                 <button
                   onClick={handleDeepFetch}
-                  disabled={deepLoading}
+                  disabled={deepLoading || deepComputing}
                   className="px-2 py-1 rounded text-[9px] font-bold transition-all"
                   style={{
-                    background: deepLoading ? 'rgba(245,158,11,0.08)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.12)' : 'rgba(245,158,11,0.12)',
-                    border: `1px solid ${deepLoading ? 'rgba(245,158,11,0.2)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.35)' : 'rgba(245,158,11,0.35)'}`,
-                    color: deepLoading ? 'rgba(245,158,11,0.5)' : deepCandles.length > 0 ? '#4ADE80' : '#F59E0B',
-                    cursor: deepLoading ? 'default' : 'pointer',
+                    background: (deepLoading || deepComputing) ? 'rgba(245,158,11,0.08)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.12)' : 'rgba(245,158,11,0.12)',
+                    border: `1px solid ${(deepLoading || deepComputing) ? 'rgba(245,158,11,0.2)' : deepCandles.length > 0 ? 'rgba(34,197,94,0.35)' : 'rgba(245,158,11,0.35)'}`,
+                    color: (deepLoading || deepComputing) ? 'rgba(245,158,11,0.5)' : deepCandles.length > 0 ? '#4ADE80' : '#F59E0B',
+                    cursor: (deepLoading || deepComputing) ? 'default' : 'pointer',
                   }}>
-                  {deepLoading ? `⧖ ${deepProgress}%…` : deepCandles.length > 0 ? `✓ Full History` : '⧖ Load History'}
+                  {deepLoading ? `⧖ ${deepProgress}%…` : deepComputing ? '⧖ Analysing…' : deepCandles.length > 0 ? `✓ Full History` : '⧖ Load History'}
                 </button>
               </div>
             </>

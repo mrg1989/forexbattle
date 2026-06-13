@@ -23,6 +23,17 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+function ukDate(dateUk: string): string {
+  if (!dateUk || dateUk.length < 10) return dateUk
+  return `${dateUk.slice(8, 10)}/${dateUk.slice(5, 7)}/${dateUk.slice(0, 4)}`
+}
+
+function ukTime(iso: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(iso))
+}
+
 function fmtPct(v: unknown) {
   if (v == null) return '—'
   return `${Number(v).toFixed(1)}%`
@@ -1031,8 +1042,8 @@ function TradeExplorer({ trades, symbol, loading }: { trades: TradeRow[]; symbol
                 <tr key={t.id} className="border-t border-btl-border/40 hover:bg-white/[0.015] transition-colors">
                   <td className="px-3 py-2 text-btl-faint tabular">{i + 1}</td>
                   <td className="px-3 py-2 text-btl-muted tabular">
-                    {t.dateUk ?? new Date(t.entryTs).toISOString().slice(0, 10)}{' '}
-                    <span className="text-btl-faint">{new Date(t.entryTs).toISOString().slice(11, 16)}</span>
+                    {ukDate(t.dateUk ?? new Date(t.entryTs).toISOString().slice(0, 10))}{' '}
+                    <span className="text-btl-faint">{ukTime(t.entryTs)}</span>
                   </td>
                   <td className={clsx('px-3 py-2 font-medium', dirColor(t.direction))}>{dirLabel(t.direction)}</td>
                   <td className="px-3 py-2 text-right tabular text-btl-text">{px(t.entryPrice)}</td>
@@ -1172,7 +1183,7 @@ function SetupExplorer({ setups, loading }: { setups: SetupRow[]; loading: boole
           <tbody>
             {visible.map(s => (
               <tr key={s.id} className="border-t border-btl-border/40 hover:bg-white/[0.015] transition-colors">
-                <td className="px-3 py-2 text-btl-text font-mono">{s.dateUk}</td>
+                <td className="px-3 py-2 text-btl-text font-mono">{ukDate(s.dateUk)}</td>
                 <td className="px-3 py-2 text-center">
                   {s.setupValid
                     ? <CheckCircle2 className="w-3.5 h-3.5 text-btl-up inline" />
@@ -1184,7 +1195,7 @@ function SetupExplorer({ setups, loading }: { setups: SetupRow[]; loading: boole
                 <td className="px-3 py-2 text-right tabular text-btl-up">{s.hhPrice.toFixed(5)}</td>
                 <td className="px-3 py-2 text-right tabular text-btl-down">{s.llPrice.toFixed(5)}</td>
                 <td className="px-3 py-2 text-btl-muted tabular">
-                  {new Date(s.setupCandleTs).toISOString().slice(11, 16)} UTC
+                  {ukTime(s.setupCandleTs)} UK
                 </td>
                 <td className="px-3 py-2 text-btl-faint tabular" title="slope · intercept">
                   {s.greenLineSlope.toExponential(3)}

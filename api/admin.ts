@@ -304,8 +304,16 @@ async function handleRunBacktest(req: VercelRequest, res: VercelResponse) {
 
     let wins = 0, losses = 0, opens = 0, signalCount = 0
 
+    const M15_MS = 15 * 60 * 1000
+
     for (const setup of setups) {
-      const sessionCandles = sessionByDate.get(setup.dateUk) ?? []
+      // Only scan M5 candles from after the M15 setup candle closes (13:15 UK).
+      // Candles at 13:00, 13:05, 13:10 are inside the M15 setup candle — using them
+      // would require the M15's final HIGH/LOW which isn't known until 13:15 (look-ahead bias).
+      const allSessionCandles = sessionByDate.get(setup.dateUk) ?? []
+      const sessionCandles = allSessionCandles.filter(
+        c => c.timestampUtc.getTime() >= setup.setupCandleTs.getTime() + M15_MS,
+      )
       const signal = detectSignal(setup, sessionCandles)
       if (!signal) continue
 
@@ -1307,8 +1315,16 @@ async function pipelineRunBacktest(
 
     let wins = 0, losses = 0, opens = 0, signalCount = 0
 
+    const M15_MS = 15 * 60 * 1000
+
     for (const setup of setups) {
-      const sessionCandles = sessionByDate.get(setup.dateUk) ?? []
+      // Only scan M5 candles from after the M15 setup candle closes (13:15 UK).
+      // Candles at 13:00, 13:05, 13:10 are inside the M15 setup candle — using them
+      // would require the M15's final HIGH/LOW which isn't known until 13:15 (look-ahead bias).
+      const allSessionCandles = sessionByDate.get(setup.dateUk) ?? []
+      const sessionCandles = allSessionCandles.filter(
+        c => c.timestampUtc.getTime() >= setup.setupCandleTs.getTime() + M15_MS,
+      )
       const signal = detectSignal(setup, sessionCandles)
       if (!signal) continue
 

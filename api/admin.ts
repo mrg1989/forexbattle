@@ -7,11 +7,14 @@
  * GET  /api/admin?action=setup-counts[&symbol=EUR_USD]
  * GET  /api/admin?action=backtest-results[&symbol=EUR_USD]
  * GET  /api/admin?action=trade-analysis-results[&symbol=EUR_USD]
+ * GET  /api/admin?action=data-coverage  ?from=YYYY-MM-DD&to=YYYY-MM-DD[&symbol=EUR_USD][&timeframes=M5,M15,H1,H4,D1]
+ * GET  /api/admin?action=import-plan    ?from=YYYY-MM-DD&to=YYYY-MM-DD[&symbol=EUR_USD][&timeframes=M5,M15]
  * POST /api/admin?action=ingest             { symbol, timeframe, from, to }
  * POST /api/admin?action=seed-strategies
  * POST /api/admin?action=run-setup-detection { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-backtest        { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-trade-analysis  { backtestRunId } OR { symbol, from, to }
+ * POST /api/admin?action=run-pipeline        { symbol, from, to }
  * GET  /api/admin?action=generate-ai-prompt    ?backtestRunId=xxx
  * POST /api/admin?action=save-ai-review        { backtestRunId, responseText, aiModel? }
  * POST /api/admin?action=run-ai-review          { backtestRunId }   (requires ANTHROPIC_API_KEY)
@@ -36,6 +39,7 @@ import type { FtmoConfig } from './_lib/ftmo.js'
 import { buildPrompt, parseRecommendations } from './_lib/ai-research.js'
 import type { FtmoInput } from './_lib/ai-research.js'
 import { toUKHour, toUKDateString } from './_lib/time.js'
+import { computeCoverage, countWeekdays } from './_lib/coverage.js'
 
 const ALLOWED_SYMBOLS    = ['EUR_USD', 'GBP_USD']
 const ALLOWED_TIMEFRAMES = ['M5', 'M15']
@@ -71,10 +75,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'run-ai-review':          return await handleRunAiReview(req, res)
       case 'ai-review-results':      return await handleAiReviewResults(req, res)
       case 'recommendation-results': return await handleRecommendationResults(req, res)
+      case 'data-coverage':          return await handleDataCoverage(req, res)
+      case 'import-plan':            return await handleImportPlan(req, res)
+      case 'run-pipeline':           return await handleRunPipeline(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, generate-ai-prompt, save-ai-review, run-ai-review, ai-review-results, recommendation-results`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, generate-ai-prompt, save-ai-review, run-ai-review, ai-review-results, recommendation-results, data-coverage, import-plan, run-pipeline`,
         })
     }
   } catch (err) {
@@ -1042,4 +1049,430 @@ async function handleSaveAiReview(req: VercelRequest, res: VercelResponse) {
       parsedSuccessfully:  parsed.length > 0,
     },
   })
+}
+
+// ── Pipeline step type ─────────────────────────────────────────────────────
+
+interface PipelineStep {
+  step:       string
+  status:     'completed' | 'skipped' | 'failed'
+  durationMs: number
+  data?:      Record<string, unknown>
+  error?:     string
+}
+
+// ── GET data-coverage ──────────────────────────────────────────────────────
+
+async function handleDataCoverage(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const from    = req.query.from    ? String(req.query.from)    : undefined
+  const to      = req.query.to      ? String(req.query.to)      : undefined
+  const symRaw  = req.query.symbol  ? String(req.query.symbol)  : undefined
+  const tfRaw   = req.query.timeframes ? String(req.query.timeframes) : 'M5,M15,H1,H4,D1'
+
+  if (!from || !DATE_RE.test(from)) return res.status(400).json({ success: false, error: 'from must be YYYY-MM-DD' })
+  if (!to   || !DATE_RE.test(to))   return res.status(400).json({ success: false, error: 'to must be YYYY-MM-DD' })
+  if (from > to) return res.status(400).json({ success: false, error: 'from must be <= to' })
+
+  const symbols    = symRaw ? [symRaw] : ALLOWED_SYMBOLS
+  const timeframes = tfRaw.split(',').map(s => s.trim()).filter(Boolean)
+  const fromDate   = new Date(from + 'T00:00:00Z')
+  const toDate     = new Date(to   + 'T23:59:59Z')
+
+  const coverage = await computeCoverage(symbols, timeframes, fromDate, toDate)
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      from,
+      to,
+      weekdays: countWeekdays(fromDate, toDate),
+      coverage,
+    },
+  })
+}
+
+// ── GET import-plan ────────────────────────────────────────────────────────
+
+async function handleImportPlan(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const from   = req.query.from   ? String(req.query.from)   : undefined
+  const to     = req.query.to     ? String(req.query.to)     : undefined
+  const symRaw = req.query.symbol ? String(req.query.symbol) : undefined
+  const tfRaw  = req.query.timeframes ? String(req.query.timeframes) : 'M5,M15'
+
+  if (!from || !DATE_RE.test(from)) return res.status(400).json({ success: false, error: 'from must be YYYY-MM-DD' })
+  if (!to   || !DATE_RE.test(to))   return res.status(400).json({ success: false, error: 'to must be YYYY-MM-DD' })
+  if (from > to) return res.status(400).json({ success: false, error: 'from must be <= to' })
+
+  const symbols    = symRaw ? [symRaw] : ALLOWED_SYMBOLS
+  // Restrict to supported timeframes only
+  const timeframes = tfRaw.split(',').map(s => s.trim()).filter(t => ALLOWED_TIMEFRAMES.includes(t))
+  if (timeframes.length === 0) timeframes.push('M5', 'M15')
+
+  const fromDate = new Date(from + 'T00:00:00Z')
+  const toDate   = new Date(to   + 'T23:59:59Z')
+
+  const coverage = await computeCoverage(symbols, timeframes, fromDate, toDate)
+
+  const jobs = coverage
+    .filter(c => c.needsImport)
+    .map(c => ({
+      symbol:        c.symbol,
+      timeframe:     c.timeframe,
+      from,
+      to,
+      currentCount:  c.actualCount,
+      expectedCount: c.expectedCount,
+      coveragePct:   c.coveragePct,
+    }))
+
+  const m15Ready = !coverage.some(c => c.timeframe === 'M15' && c.needsImport)
+  const m5Ready  = !coverage.some(c => c.timeframe === 'M5'  && c.needsImport)
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      from,
+      to,
+      weekdays:               countWeekdays(fromDate, toDate),
+      coverage,
+      jobs,
+      readyForSetupDetection: m15Ready,
+      readyForBacktest:       m5Ready,
+      readyToRunPipeline:     m15Ready && m5Ready,
+    },
+  })
+}
+
+// ── POST run-pipeline ──────────────────────────────────────────────────────
+// Runs the full pipeline in order: import M15 → import M5 → setup detection
+// → backtest → path analysis → analytics → FTMO. Skips import if coverage ≥ 90%.
+// Stops on fatal failures (import / setup / backtest); continues on non-fatal ones.
+// AI review is NOT included — always trigger that manually.
+
+async function handleRunPipeline(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { symbol, from, to } = req.body ?? {}
+
+  if (!symbol || !ALLOWED_SYMBOLS.includes(symbol))
+    return res.status(400).json({ success: false, error: `symbol must be one of: ${ALLOWED_SYMBOLS.join(', ')}` })
+  if (!from || !DATE_RE.test(from))
+    return res.status(400).json({ success: false, error: 'from must be YYYY-MM-DD' })
+  if (!to || !DATE_RE.test(to))
+    return res.status(400).json({ success: false, error: 'to must be YYYY-MM-DD' })
+  if (from > to)
+    return res.status(400).json({ success: false, error: 'from must be <= to' })
+
+  const fromDate = new Date(from + 'T00:00:00Z')
+  const toDate   = new Date(to   + 'T23:59:59Z')
+
+  const sv = await getActiveStrategyVersion('Crossfire')
+  if (!sv) return res.status(400).json({ success: false, error: 'No active Crossfire strategy version — run action=seed-strategies first.' })
+  const settings = sv.settingsJson as unknown as CrossfireSettings
+
+  const pipelineStart = Date.now()
+  const steps: PipelineStep[] = []
+
+  async function runStep<T>(name: string, fn: () => Promise<T>): Promise<T | null> {
+    const t0 = Date.now()
+    try {
+      const data = await fn()
+      steps.push({ step: name, status: 'completed', durationMs: Date.now() - t0, data: data as Record<string, unknown> })
+      return data
+    } catch (err) {
+      steps.push({ step: name, status: 'failed', durationMs: Date.now() - t0, error: err instanceof Error ? err.message : String(err) })
+      return null
+    }
+  }
+
+  function abortWith(reason: string) {
+    return res.status(200).json({
+      success: false,
+      error:   reason,
+      data:    { symbol, from, to, backtestRunId: null, steps, totalDurationMs: Date.now() - pipelineStart, completedAt: new Date().toISOString() },
+    })
+  }
+
+  // ── Step 1: Import M15 if needed ─────────────────────────────────────────
+  {
+    const [cov] = await computeCoverage([symbol], ['M15'], fromDate, toDate)
+    if (cov.needsImport) {
+      const r = await runStep('import-m15', () => ingestCandles(symbol, 'M15', fromDate, toDate))
+      if (r === null) return abortWith('M15 import failed — cannot run setup detection without M15 candles')
+    } else {
+      steps.push({ step: 'import-m15', status: 'skipped', durationMs: 0, data: { reason: `${cov.coveragePct}% coverage — ${cov.actualCount} candles already stored` } })
+    }
+  }
+
+  // ── Step 2: Import M5 if needed ──────────────────────────────────────────
+  {
+    const [cov] = await computeCoverage([symbol], ['M5'], fromDate, toDate)
+    if (cov.needsImport) {
+      const r = await runStep('import-m5', () => ingestCandles(symbol, 'M5', fromDate, toDate))
+      if (r === null) return abortWith('M5 import failed — cannot run backtest without M5 candles')
+    } else {
+      steps.push({ step: 'import-m5', status: 'skipped', durationMs: 0, data: { reason: `${cov.coveragePct}% coverage — ${cov.actualCount} candles already stored` } })
+    }
+  }
+
+  // ── Step 3: Setup detection (M15) ────────────────────────────────────────
+  {
+    const r = await runStep('setup-detection', () => runSetupDetectionForRange(symbol, sv.id, fromDate, toDate))
+    if (r === null) return abortWith('Setup detection failed — cannot run backtest without setups')
+  }
+
+  // ── Step 4: Backtest (M5 signals + trade simulation) ─────────────────────
+  let backtestRunId: string | null = null
+  {
+    const r = await runStep('backtest', () => pipelineRunBacktest(symbol, sv.id, settings, fromDate, toDate, from, to))
+    if (r === null) return abortWith('Backtest failed')
+    backtestRunId = r.backtestRunId
+  }
+
+  // ── Step 5: Trade path analysis — non-fatal ───────────────────────────────
+  if (backtestRunId) {
+    await runStep('path-analysis', () => pipelineRunPathAnalysis(backtestRunId!, symbol))
+  }
+
+  // ── Step 6: Analytics — non-fatal ────────────────────────────────────────
+  if (backtestRunId) {
+    await runStep('analytics', () => pipelineRunAnalytics(backtestRunId!))
+  }
+
+  // ── Step 7: FTMO evaluation — non-fatal ──────────────────────────────────
+  if (backtestRunId) {
+    await runStep('ftmo', () => pipelineRunFtmo(backtestRunId!, sv.id, settings.riskReward))
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      symbol, from, to,
+      strategyVersionId: sv.id,
+      backtestRunId,
+      steps,
+      totalDurationMs: Date.now() - pipelineStart,
+      completedAt:     new Date().toISOString(),
+    },
+  })
+}
+
+// ── Pipeline step helpers ──────────────────────────────────────────────────
+// Extracted so handleRunPipeline stays readable. Each helper is a thin wrapper
+// around the same logic used in the individual action handlers.
+
+async function pipelineRunBacktest(
+  symbol:   string,
+  svId:     string,
+  settings: CrossfireSettings,
+  fromDate: Date,
+  toDate:   Date,
+  from:     string,
+  to:       string,
+): Promise<{ backtestRunId: string; setupsProcessed: number; signalsDetected: number; wins: number; losses: number; opens: number; winRate: number | null }> {
+  const run = await db.backtestRun.create({
+    data: { strategyVersionId: svId, symbol, timeframe: 'M5', fromDate, toDate, status: 'running' },
+  })
+
+  try {
+    const setups = await db.crossfireSetup.findMany({
+      where:   { strategyVersionId: svId, symbol, setupValid: true, dateUk: { gte: from, lte: to } },
+      orderBy: { dateUk: 'asc' },
+    })
+
+    const m5Candles = await db.candle.findMany({
+      where:   { symbol, timeframe: 'M5', timestampUtc: { gte: fromDate, lte: toDate } },
+      orderBy: { timestampUtc: 'asc' },
+    })
+
+    const sessionByDate = new Map<string, Candle[]>()
+    for (const c of m5Candles) {
+      const h = toUKHour(c.timestampUtc.getTime())
+      if (h < 13 || h >= 16) continue
+      const d = toUKDateString(c.timestampUtc.getTime())
+      let arr = sessionByDate.get(d)
+      if (!arr) { arr = []; sessionByDate.set(d, arr) }
+      arr.push(c)
+    }
+
+    let wins = 0, losses = 0, opens = 0, signalCount = 0
+
+    for (const setup of setups) {
+      const sessionCandles = sessionByDate.get(setup.dateUk) ?? []
+      const signal = detectSignal(setup, sessionCandles)
+      if (!signal) continue
+
+      signalCount++
+
+      const signalRow = await db.signal.upsert({
+        where:  { setupId_direction: { setupId: setup.id, direction: signal.direction } },
+        create: {
+          setupId: setup.id, direction: signal.direction, signalTs: signal.signalTs,
+          breakoutType: signal.breakoutType, signalValid: signal.signalValid, invalidReason: signal.invalidReason,
+          candleOpen: signal.candleOpen, candleHigh: signal.candleHigh, candleLow: signal.candleLow,
+          candleClose: signal.candleClose, candleVolume: signal.candleVolume, linePriceAtSignal: signal.linePriceAtSignal,
+        },
+        update: {
+          signalTs: signal.signalTs, breakoutType: signal.breakoutType, signalValid: signal.signalValid,
+          invalidReason: signal.invalidReason, candleOpen: signal.candleOpen, candleHigh: signal.candleHigh,
+          candleLow: signal.candleLow, candleClose: signal.candleClose, candleVolume: signal.candleVolume,
+          linePriceAtSignal: signal.linePriceAtSignal,
+        },
+      })
+
+      const postSignal = sessionCandles.filter(c => c.timestampUtc.getTime() > signal.signalTs.getTime())
+      const trade = simulateTrade(signal.direction, signal.signalTs, signal.candleClose, setup, settings.riskReward, postSignal)
+
+      await db.trade.upsert({
+        where:  { signalId: signalRow.id },
+        create: {
+          signalId: signalRow.id, strategyVersionId: svId, backtestRunId: run.id,
+          symbol, direction: signal.direction, entryTs: signal.signalTs, entryPrice: signal.candleClose,
+          slPrice: trade.slPrice, tpPrice: trade.tpPrice, exitTs: trade.exitTs,
+          exitPrice: trade.exitPrice, result: trade.result, profitLossR: trade.profitLossR,
+        },
+        update: {
+          backtestRunId: run.id, slPrice: trade.slPrice, tpPrice: trade.tpPrice,
+          exitTs: trade.exitTs, exitPrice: trade.exitPrice, result: trade.result, profitLossR: trade.profitLossR,
+        },
+      })
+
+      if (trade.result === 'win')  wins++
+      if (trade.result === 'loss') losses++
+      if (trade.result === 'open') opens++
+    }
+
+    const decided = wins + losses
+    const winRate = decided > 0 ? wins / decided : null
+
+    await db.backtestRun.update({
+      where: { id: run.id },
+      data:  { status: 'completed', tradeCount: wins + losses + opens, winCount: wins, lossCount: losses, winRate, completedAt: new Date() },
+    })
+
+    return { backtestRunId: run.id, setupsProcessed: setups.length, signalsDetected: signalCount, wins, losses, opens, winRate }
+  } catch (err) {
+    await db.backtestRun.update({ where: { id: run.id }, data: { status: 'failed', errorMessage: err instanceof Error ? err.message : String(err) } }).catch(() => {})
+    throw err
+  }
+}
+
+async function pipelineRunPathAnalysis(backtestRunId: string, symbol: string): Promise<{ processed: number }> {
+  const trades = await db.trade.findMany({
+    where:   { backtestRunId },
+    orderBy: { entryTs: 'asc' },
+  })
+  if (trades.length === 0) return { processed: 0 }
+
+  const minEntryTs = trades[0].entryTs
+  const maxExitTs  = trades.reduce<Date>((max, t) => {
+    const ts = t.exitTs ?? t.entryTs
+    return ts > max ? ts : max
+  }, trades[0].exitTs ?? trades[0].entryTs)
+
+  const allCandles = await db.candle.findMany({
+    where:   { symbol, timeframe: 'M5', timestampUtc: { gte: minEntryTs, lte: maxExitTs } },
+    orderBy: { timestampUtc: 'asc' },
+  })
+
+  let processed = 0
+  for (const trade of trades) {
+    const entryTMs     = trade.entryTs.getTime()
+    const exitTMs      = trade.exitTs?.getTime() ?? Infinity
+    const tradeCandles = allCandles.filter(c => {
+      const ts = c.timestampUtc.getTime()
+      return ts > entryTMs && ts <= exitTMs
+    })
+    const result = computePathAnalysis(trade, tradeCandles)
+    await db.tradePathAnalysis.upsert({
+      where:  { tradeId: trade.id },
+      create: { tradeId: trade.id, ...result },
+      update: { ...result },
+    })
+    processed++
+  }
+  return { processed }
+}
+
+async function pipelineRunAnalytics(backtestRunId: string): Promise<{ summariesGenerated: number; tradeCount: number }> {
+  const rawTrades = await db.trade.findMany({
+    where:   { backtestRunId },
+    orderBy: { entryTs: 'asc' },
+    include: {
+      pathAnalysis: true,
+      signal:       { select: { breakoutType: true } },
+    },
+  })
+
+  const trades: TradeRecord[] = rawTrades.map(t => ({
+    id:           t.id,
+    direction:    t.direction,
+    entryTs:      t.entryTs,
+    result:       t.result,
+    profitLossR:  t.profitLossR,
+    breakoutType: t.signal?.breakoutType ?? 'unknown',
+    pathAnalysis: t.pathAnalysis ? {
+      mfeR:               t.pathAnalysis.mfeR,
+      maeR:               t.pathAnalysis.maeR,
+      reached1r:          t.pathAnalysis.reached1r,
+      reached2r:          t.pathAnalysis.reached2r,
+      reached3r:          t.pathAnalysis.reached3r,
+      timeTo1rMinutes:    t.pathAnalysis.timeTo1rMinutes,
+      timeToExitMinutes:  t.pathAnalysis.timeToExitMinutes,
+      breakEvenWouldHelp: t.pathAnalysis.breakEvenWouldHelp,
+    } : null,
+  }))
+
+  const summaries = computeAllSummaries(trades)
+  let summariesGenerated = 0
+  for (const [summaryType, summaryJson] of Object.entries(summaries)) {
+    await db.analyticsSummary.upsert({
+      where:  { backtestRunId_summaryType: { backtestRunId, summaryType } },
+      create: { backtestRunId, summaryType, summaryJson },
+      update: { summaryJson },
+    })
+    summariesGenerated++
+  }
+  return { summariesGenerated, tradeCount: trades.length }
+}
+
+async function pipelineRunFtmo(backtestRunId: string, strategyVersionId: string, rrRatio: number): Promise<{ tested: number; passCount: number }> {
+  const trades = await db.trade.findMany({
+    where:   { backtestRunId },
+    orderBy: { entryTs: 'asc' },
+    select:  { entryTs: true, profitLossR: true },
+  })
+
+  const scenarios: FtmoConfig[] = [
+    { accountSize: 100_000, riskPercent: 0.01, rrRatio, dailyLossLimit: 0.05, maxDrawdownLimit: 0.10, profitTarget: 0.08 },
+    { accountSize: 100_000, riskPercent: 0.01, rrRatio, dailyLossLimit: 0.05, maxDrawdownLimit: 0.10, profitTarget: 0.10 },
+  ]
+
+  let passCount = 0
+  for (const config of scenarios) {
+    const sim = simulateFtmo(trades, config)
+    await db.fundedAccountTest.create({
+      data: {
+        strategyVersionId,
+        backtestRunId,
+        accountSize:      config.accountSize,
+        riskPercent:      config.riskPercent,
+        rrRatio:          config.rrRatio,
+        dailyLossLimit:   config.dailyLossLimit,
+        maxDrawdownLimit: config.maxDrawdownLimit,
+        passed:           sim.passed,
+        peakBalance:      sim.peakBalance,
+        worstDrawdown:    sim.worstDrawdown,
+        dailyBreachCount: sim.dailyBreachCount,
+        failureReason:    sim.failureReason,
+        equityCurveJson:  sim.equityCurveJson as object,
+      },
+    })
+    if (sim.passed) passCount++
+  }
+  return { tested: scenarios.length, passCount }
 }

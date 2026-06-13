@@ -95,6 +95,70 @@ export interface PromptData {
   autoReviewAvailable: boolean
 }
 
+export interface CoverageRow {
+  symbol: string
+  timeframe: string
+  actualCount: number
+  expectedCount: number
+  missingEstimate: number
+  coveragePct: number
+  earliestCandle: string | null
+  latestCandle: string | null
+  lastImportAt: string | null
+  source: string | null
+  hasData: boolean
+  needsImport: boolean
+  supported: boolean
+  stage: string
+}
+
+export interface CoverageResult {
+  from: string
+  to: string
+  weekdays: number
+  coverage: CoverageRow[]
+}
+
+export interface ImportJob {
+  symbol: string
+  timeframe: string
+  from: string
+  to: string
+  currentCount: number
+  expectedCount: number
+  coveragePct: number
+}
+
+export interface ImportPlanResult {
+  from: string
+  to: string
+  weekdays: number
+  coverage: CoverageRow[]
+  jobs: ImportJob[]
+  readyForSetupDetection: boolean
+  readyForBacktest: boolean
+  readyToRunPipeline: boolean
+}
+
+export interface PipelineStep {
+  step: string
+  status: 'completed' | 'skipped' | 'failed'
+  durationMs: number
+  data?: Record<string, unknown>
+  error?: string
+}
+
+export interface PipelineResult {
+  symbol: string
+  from: string
+  to: string
+  strategyVersionId: string
+  backtestRunId: string | null
+  steps: PipelineStep[]
+  totalDurationMs: number
+  completedAt: string
+}
+
 // ── Methods ────────────────────────────────────────────────────────────────
 
 export const adminApi = {
@@ -120,4 +184,20 @@ export const adminApi = {
     req<{ reviewId: string; recommendationCount: number; parsedSuccessfully: boolean }>(
       'POST', 'save-ai-review', {}, { backtestRunId, responseText, aiModel },
     ),
+
+  getDataCoverage: (from: string, to: string, symbol?: string, timeframes?: string) =>
+    req<CoverageResult>('GET', 'data-coverage', {
+      from, to,
+      ...(symbol     ? { symbol }     : {}),
+      ...(timeframes ? { timeframes } : {}),
+    }),
+
+  getImportPlan: (from: string, to: string, symbol?: string) =>
+    req<ImportPlanResult>('GET', 'import-plan', {
+      from, to,
+      ...(symbol ? { symbol } : {}),
+    }),
+
+  runPipeline: (symbol: string, from: string, to: string) =>
+    req<PipelineResult>('POST', 'run-pipeline', {}, { symbol, from, to }),
 }

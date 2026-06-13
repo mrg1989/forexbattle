@@ -5,11 +5,13 @@ import {
   ArrowLeft, BarChart3, TrendingUp, Bot, List,
   Copy, Check, X, Loader2, AlertCircle, Zap,
   ChevronDown, ChevronUp, RefreshCw,
+  Database, Play, CheckCircle2, SkipForward, XCircle, Clock,
 } from 'lucide-react'
 import { adminApi } from '../lib/adminApi'
 import type {
   BacktestRun, AnalyticsSummary, FtmoResult,
   AiReview, Recommendation, PromptData,
+  CoverageRow, ImportPlanResult, PipelineResult, PipelineStep,
 } from '../lib/adminApi'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -711,6 +713,295 @@ function RecsPanel({ recommendations, loading }: { recommendations: Recommendati
   )
 }
 
+// ── Pipeline Panel ─────────────────────────────────────────────────────────
+
+const SYMBOLS = ['EUR_USD', 'GBP_USD']
+
+const TIMEFRAME_ORDER = ['M5', 'M15', 'H1', 'H4', 'D1']
+
+function coverageBadge(row: CoverageRow) {
+  if (!row.supported) return <span className="text-xs text-btl-faint">planned</span>
+  if (!row.hasData)   return <span className="text-xs text-btl-down font-medium">no data</span>
+  const color = row.coveragePct >= 90
+    ? 'text-btl-up'
+    : row.coveragePct >= 60
+      ? 'text-btl-gold'
+      : 'text-btl-down'
+  return <span className={clsx('text-xs font-semibold tabular', color)}>{row.coveragePct.toFixed(1)}%</span>
+}
+
+function stepIcon(status: PipelineStep['status']) {
+  if (status === 'completed') return <CheckCircle2 className="w-4 h-4 text-btl-up shrink-0" />
+  if (status === 'skipped')   return <SkipForward className="w-4 h-4 text-btl-muted shrink-0" />
+  return <XCircle className="w-4 h-4 text-btl-down shrink-0" />
+}
+
+function fmtDuration(ms: number) {
+  if (ms === 0)    return '—'
+  if (ms < 1000)   return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms / 1000 / 60)}m ${Math.round((ms / 1000) % 60)}s`
+}
+
+function PipelinePanel() {
+  const [symbol, setSymbol]               = useState('EUR_USD')
+  const [from, setFrom]                   = useState('')
+  const [to, setTo]                       = useState('')
+  const [coverageLoading, setCoverageLoading] = useState(false)
+  const [coverageError, setCoverageError] = useState<string | null>(null)
+  const [coverageData, setCoverageData]   = useState<ImportPlanResult | null>(null)
+  const [running, setRunning]             = useState(false)
+  const [runError, setRunError]           = useState<string | null>(null)
+  const [result, setResult]               = useState<PipelineResult | null>(null)
+
+  const checkCoverage = async () => {
+    if (!from || !to) return
+    setCoverageLoading(true)
+    setCoverageError(null)
+    setCoverageData(null)
+    setResult(null)
+    try {
+      const data = await adminApi.getImportPlan(from, to, symbol)
+      setCoverageData(data)
+    } catch (e) {
+      setCoverageError(e instanceof Error ? e.message : 'Failed to load coverage')
+    } finally {
+      setCoverageLoading(false)
+    }
+  }
+
+  const runPipeline = async () => {
+    if (!from || !to) return
+    setRunning(true)
+    setRunError(null)
+    setResult(null)
+    try {
+      const data = await adminApi.runPipeline(symbol, from, to)
+      setResult(data)
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : 'Pipeline failed')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const sorted = coverageData
+    ? TIMEFRAME_ORDER.map(tf => coverageData.coverage.find(r => r.timeframe === tf)).filter(Boolean) as CoverageRow[]
+    : []
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Config */}
+      <div className="glass-md rounded-2xl p-5">
+        <h3 className="font-semibold text-btl-text mb-4">Data Coverage &amp; Pipeline</h3>
+        <div className="flex flex-wrap gap-3 items-end">
+          {/* Symbol */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-btl-muted">Symbol</label>
+            <select
+              value={symbol}
+              onChange={e => { setSymbol(e.target.value); setCoverageData(null); setResult(null) }}
+              className="bg-btl-surface border border-btl-border rounded-lg px-3 py-2 text-sm text-btl-text focus:outline-none focus:border-btl-purple/50"
+            >
+              {SYMBOLS.map(s => <option key={s} value={s}>{s.replace('_', '/')}</option>)}
+            </select>
+          </div>
+          {/* From */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-btl-muted">From</label>
+            <input
+              type="date"
+              value={from}
+              onChange={e => { setFrom(e.target.value); setCoverageData(null); setResult(null) }}
+              className="bg-btl-surface border border-btl-border rounded-lg px-3 py-2 text-sm text-btl-text focus:outline-none focus:border-btl-purple/50"
+            />
+          </div>
+          {/* To */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-btl-muted">To</label>
+            <input
+              type="date"
+              value={to}
+              onChange={e => { setTo(e.target.value); setCoverageData(null); setResult(null) }}
+              className="bg-btl-surface border border-btl-border rounded-lg px-3 py-2 text-sm text-btl-text focus:outline-none focus:border-btl-purple/50"
+            />
+          </div>
+          {/* Check */}
+          <button
+            onClick={checkCoverage}
+            disabled={!from || !to || coverageLoading}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium glass-md text-btl-muted hover:text-btl-text disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {coverageLoading ? <Spinner size={4} /> : <Database className="w-4 h-4" />}
+            Check Coverage
+          </button>
+        </div>
+        {coverageError && <div className="mt-3"><ErrorBanner message={coverageError} /></div>}
+      </div>
+
+      {/* Coverage table */}
+      {coverageData && (
+        <div className="glass-md rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-btl-text">
+              Coverage &mdash; {symbol.replace('_', '/')} &mdash; {coverageData.weekdays} weekdays
+            </h3>
+            {coverageData.readyToRunPipeline ? (
+              <span className="text-xs text-btl-up font-medium">Ready to run</span>
+            ) : (
+              <span className="text-xs text-btl-gold font-medium">{coverageData.jobs.length} import{coverageData.jobs.length !== 1 ? 's' : ''} needed</span>
+            )}
+          </div>
+
+          <table className="w-full text-sm mb-4">
+            <thead>
+              <tr className="text-xs text-btl-muted border-b border-btl-border">
+                <th className="text-left pb-2 font-normal">Timeframe</th>
+                <th className="text-right pb-2 font-normal">Coverage</th>
+                <th className="text-right pb-2 font-normal hidden sm:table-cell">Actual</th>
+                <th className="text-right pb-2 font-normal hidden sm:table-cell">Expected</th>
+                <th className="text-right pb-2 font-normal hidden md:table-cell">Earliest</th>
+                <th className="text-right pb-2 font-normal hidden md:table-cell">Latest</th>
+                <th className="text-left pb-2 font-normal pl-4">Usage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(row => (
+                <tr key={row.timeframe} className={clsx('border-t border-btl-border/40', !row.supported && 'opacity-50')}>
+                  <td className="py-2 font-mono text-btl-text">{row.timeframe}</td>
+                  <td className="py-2 text-right">{coverageBadge(row)}</td>
+                  <td className="py-2 text-right text-btl-muted tabular hidden sm:table-cell">{row.actualCount.toLocaleString()}</td>
+                  <td className="py-2 text-right text-btl-muted tabular hidden sm:table-cell">{row.expectedCount.toLocaleString()}</td>
+                  <td className="py-2 text-right text-btl-muted hidden md:table-cell">
+                    {row.earliestCandle ? fmtDate(row.earliestCandle) : '—'}
+                  </td>
+                  <td className="py-2 text-right text-btl-muted hidden md:table-cell">
+                    {row.latestCandle ? fmtDate(row.latestCandle) : '—'}
+                  </td>
+                  <td className="py-2 pl-4 text-xs text-btl-muted">{row.stage}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Import jobs */}
+          {coverageData.jobs.length > 0 && (
+            <div className="flex flex-col gap-2 pt-2 border-t border-btl-border/40">
+              <p className="text-xs font-medium text-btl-gold">Imports needed before pipeline can run:</p>
+              {coverageData.jobs.map(j => (
+                <div key={`${j.symbol}|${j.timeframe}`} className="flex items-center gap-3 text-xs">
+                  <span className="font-mono text-btl-text">{j.symbol} {j.timeframe}</span>
+                  <span className="text-btl-muted">{j.currentCount.toLocaleString()} / {j.expectedCount.toLocaleString()} candles ({j.coveragePct.toFixed(1)}%)</span>
+                </div>
+              ))}
+              <p className="text-xs text-btl-muted mt-1">
+                Use <span className="font-mono text-btl-faint">action=ingest</span> for each, or click Run Pipeline below — it will import automatically.
+              </p>
+            </div>
+          )}
+
+          {/* Run pipeline button */}
+          <div className="flex items-center gap-3 mt-4 pt-4 border-t border-btl-border/40">
+            <button
+              onClick={runPipeline}
+              disabled={running}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold bg-btl-purple text-white hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {running ? <Spinner size={4} /> : <Play className="w-4 h-4" />}
+              Run Full Pipeline
+            </button>
+            <p className="text-xs text-btl-muted">
+              Import → Setup detection → Backtest → Path analysis → Analytics → FTMO
+            </p>
+          </div>
+          {runError && <div className="mt-3"><ErrorBanner message={runError} /></div>}
+        </div>
+      )}
+
+      {/* Pipeline result */}
+      {result && (
+        <div className="glass-md rounded-2xl p-5">
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h3 className="font-semibold text-btl-text">Pipeline Result</h3>
+              <p className="text-xs text-btl-muted mt-0.5">
+                {result.symbol.replace('_', '/')} · {result.from} – {result.to} · total {fmtDuration(result.totalDurationMs)}
+              </p>
+            </div>
+            {result.backtestRunId && (
+              <p className="text-xs font-mono text-btl-muted truncate max-w-[200px]">{result.backtestRunId}</p>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {result.steps.map(step => (
+              <div key={step.step} className="flex items-start gap-3 px-3 py-2.5 rounded-xl glass-md">
+                {stepIcon(step.status)}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-mono text-btl-text">{step.step}</span>
+                    <span className={clsx(
+                      'text-xs',
+                      step.status === 'completed' ? 'text-btl-up' :
+                      step.status === 'skipped'   ? 'text-btl-muted' : 'text-btl-down',
+                    )}>
+                      {step.status}
+                    </span>
+                  </div>
+                  {step.data && Object.keys(step.data).length > 0 && (
+                    <p className="text-xs text-btl-muted mt-0.5 truncate">
+                      {step.data.reason
+                        ? String(step.data.reason)
+                        : Object.entries(step.data)
+                            .filter(([, v]) => v !== null && v !== undefined)
+                            .map(([k, v]) => `${k}: ${String(v)}`)
+                            .join(' · ')
+                      }
+                    </p>
+                  )}
+                  {step.error && <p className="text-xs text-btl-down mt-0.5">{step.error}</p>}
+                </div>
+                <div className="flex items-center gap-1 text-xs text-btl-faint shrink-0">
+                  <Clock className="w-3 h-3" />
+                  {fmtDuration(step.durationMs)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {result.backtestRunId && (
+            <p className="mt-4 text-xs text-btl-muted">
+              Backtest run saved. Select it in the sidebar to view analytics, FTMO, and AI review tabs.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Timeframe key */}
+      {!coverageData && !coverageLoading && (
+        <div className="glass-md rounded-2xl p-5">
+          <h3 className="text-xs font-semibold text-btl-muted uppercase tracking-wider mb-3">Timeframe Status</h3>
+          <div className="flex flex-col gap-2">
+            {[
+              { tf: 'M5',  active: true,  label: 'Active',  desc: 'Signal detection · trade simulation · path analysis' },
+              { tf: 'M15', active: true,  label: 'Active',  desc: 'Setup detection (08:00–13:00 UK window)' },
+              { tf: 'H1',  active: false, label: 'Planned', desc: 'H1 trend filter — not yet active' },
+              { tf: 'H4',  active: false, label: 'Planned', desc: 'H4 bias filter — not yet active' },
+              { tf: 'D1',  active: false, label: 'Planned', desc: 'Daily range / PDH / PDL — not yet active' },
+            ].map(({ tf, active, label, desc }) => (
+              <div key={tf} className={clsx('flex items-start gap-3', !active && 'opacity-50')}>
+                <span className="font-mono text-sm text-btl-text w-8 shrink-0">{tf}</span>
+                <span className={clsx('text-xs font-medium shrink-0 mt-0.5', active ? 'text-btl-up' : 'text-btl-muted')}>{label}</span>
+                <span className="text-xs text-btl-muted">{desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Run Sidebar Item ───────────────────────────────────────────────────────
 
 function RunItem({ run, selected, onClick }: { run: BacktestRun; selected: boolean; onClick: () => void }) {
@@ -761,6 +1052,7 @@ export default function ResearchDashboard() {
   const [runsLoading, setRunsLoading] = useState(true)
   const [runsError, setRunsError] = useState<string | null>(null)
 
+  const [showPipeline, setShowPipeline] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('analytics')
 
@@ -805,6 +1097,7 @@ export default function ResearchDashboard() {
   }, [])
 
   const selectRun = (id: string) => {
+    setShowPipeline(false)
     setSelectedId(id)
     loadRunData(id)
   }
@@ -848,9 +1141,26 @@ export default function ResearchDashboard() {
       )}
 
       <div className="flex flex-1 min-h-0">
-        {/* Sidebar — backtest runs */}
+        {/* Sidebar */}
         <aside className="w-56 shrink-0 border-r border-btl-border flex flex-col">
-          <div className="flex items-center justify-between px-3 py-3 border-b border-btl-border">
+          {/* Pipeline button */}
+          <div className="px-2 pt-2 pb-1 border-b border-btl-border">
+            <button
+              onClick={() => { setShowPipeline(true); setSelectedId(null) }}
+              className={clsx(
+                'w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-colors',
+                showPipeline
+                  ? 'bg-btl-purple/15 border border-btl-purple/30 text-btl-text'
+                  : 'text-btl-muted hover:text-btl-text hover:bg-btl-faint border border-transparent',
+              )}
+            >
+              <Database className="w-4 h-4" />
+              Pipeline
+            </button>
+          </div>
+
+          {/* Backtest runs */}
+          <div className="flex items-center justify-between px-3 py-2.5">
             <span className="text-xs font-semibold text-btl-muted uppercase tracking-wider">Backtest Runs</span>
             <button
               onClick={() => {
@@ -863,23 +1173,27 @@ export default function ResearchDashboard() {
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
+          <div className="flex-1 overflow-y-auto px-2 pb-2 flex flex-col gap-1">
             {runsLoading && <div className="flex justify-center py-8"><Spinner /></div>}
             {runsError && <ErrorBanner message={runsError} />}
             {!runsLoading && !runsError && runs.length === 0 && (
               <p className="text-xs text-btl-muted px-2 py-4">No backtest runs yet.</p>
             )}
             {runs.map(run => (
-              <RunItem key={run.id} run={run} selected={run.id === selectedId} onClick={() => selectRun(run.id)} />
+              <RunItem key={run.id} run={run} selected={run.id === selectedId && !showPipeline} onClick={() => selectRun(run.id)} />
             ))}
           </div>
         </aside>
 
         {/* Main content */}
         <main className="flex-1 min-w-0 flex flex-col">
-          {!selectedId ? (
+          {showPipeline ? (
+            <div className="flex-1 overflow-y-auto p-6">
+              <PipelinePanel />
+            </div>
+          ) : !selectedId ? (
             <div className="flex-1 flex items-center justify-center text-btl-muted text-sm">
-              Select a backtest run from the sidebar
+              Select a backtest run from the sidebar, or use Pipeline to import data and run the full pipeline.
             </div>
           ) : (
             <>

@@ -140,6 +140,16 @@ run_tests() {
   echo "  HTTP $STATUS"
   pretty_body
   if [[ "$STATUS" == "200" ]] && check_success; then pass; else fail "HTTP $STATUS or success!=true"; fi
+
+  # --- trade-analysis-results ---
+  echo ""
+  echo "────────────────────────────────────────"
+  echo "  TEST: action=trade-analysis-results"
+  echo "────────────────────────────────────────"
+  curl_request GET "$BASE?action=trade-analysis-results&symbol=EUR_USD"
+  echo "  HTTP $STATUS"
+  pretty_body
+  if [[ "$STATUS" == "200" ]] && check_success; then pass; else fail "HTTP $STATUS or success!=true"; fi
 }
 
 run_tests
@@ -180,6 +190,18 @@ curl -X POST "$BASE?action=run-setup-detection" \
 
 # Run backtest (requires M5 candles + valid setups):
 curl -X POST "$BASE?action=run-backtest" \
+  -H "Authorization: Bearer $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"EUR_USD","from":"2024-01-08","to":"2024-01-12"}'
+
+# Run trade path analysis — by backtestRunId (replace ID with actual value):
+curl -X POST "$BASE?action=run-trade-analysis" \
+  -H "Authorization: Bearer $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"backtestRunId":"<id-from-run-backtest-response>"}'
+
+# OR run trade path analysis by date range:
+curl -X POST "$BASE?action=run-trade-analysis" \
   -H "Authorization: Bearer $ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"symbol":"EUR_USD","from":"2024-01-08","to":"2024-01-12"}'

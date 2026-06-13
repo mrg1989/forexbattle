@@ -6,10 +6,12 @@
  * GET  /api/admin?action=strategies
  * GET  /api/admin?action=setup-counts[&symbol=EUR_USD]
  * GET  /api/admin?action=backtest-results[&symbol=EUR_USD]
+ * GET  /api/admin?action=trade-analysis-results[&symbol=EUR_USD]
  * POST /api/admin?action=ingest             { symbol, timeframe, from, to }
  * POST /api/admin?action=seed-strategies
  * POST /api/admin?action=run-setup-detection { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-backtest        { symbol, from, to, strategyVersionId? }
+ * POST /api/admin?action=run-trade-analysis  { backtestRunId } OR { symbol, from, to }
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
@@ -21,6 +23,7 @@ import type { CrossfireSettings } from './_lib/strategy-registry.js'
 import { runSetupDetectionForRange } from './_lib/crossfire-setup.js'
 import { detectSignal } from './_lib/signal-detection.js'
 import { simulateTrade } from './_lib/trade-simulation.js'
+import { computePathAnalysis } from './_lib/trade-path-analysis.js'
 import { toUKHour, toUKDateString } from './_lib/time.js'
 
 const ALLOWED_SYMBOLS    = ['EUR_USD', 'GBP_USD']
@@ -44,12 +47,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'strategies':           return await handleStrategies(req, res)
       case 'run-setup-detection':  return await handleRunSetupDetection(req, res)
       case 'setup-counts':         return await handleSetupCounts(req, res)
-      case 'run-backtest':         return await handleRunBacktest(req, res)
-      case 'backtest-results':     return await handleBacktestResults(req, res)
+      case 'run-backtest':          return await handleRunBacktest(req, res)
+      case 'backtest-results':      return await handleBacktestResults(req, res)
+      case 'run-trade-analysis':    return await handleRunTradeAnalysis(req, res)
+      case 'trade-analysis-results': return await handleTradeAnalysisResults(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results`,
         })
     }
   } catch (err) {
@@ -358,3 +363,129 @@ async function handleBacktestResults(req: VercelRequest, res: VercelResponse) {
     },
   })
 }
+
+// ── POST run-trade-analysis ────────────────────────────────────────────────
+
+async function handleRunTradeAnalysis(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { backtestRunId, symbol, from, to } = req.body ?? {}
+
+  let tradeSymbol: string
+  let tradeWhere: Record<string, unknown>
+
+  if (backtestRunId) {
+    const run = await db.backtestRun.findUnique({ where: { id: String(backtestRunId) } })
+    if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+    tradeSymbol = run.symbol
+    tradeWhere  = { backtestRunId: String(backtestRunId) }
+  } else if (symbol && from && to) {
+    if (!ALLOWED_SYMBOLS.includes(symbol))
+      return res.status(400).json({ success: false, error: `symbol must be one of: ${ALLOWED_SYMBOLS.join(', ')}` })
+    if (!DATE_RE.test(from))
+      return res.status(400).json({ success: false, error: 'from must be YYYY-MM-DD' })
+    if (!DATE_RE.test(to))
+      return res.status(400).json({ success: false, error: 'to must be YYYY-MM-DD' })
+    if (from > to)
+      return res.status(400).json({ success: false, error: 'from must be <= to' })
+    tradeSymbol = symbol
+    tradeWhere  = {
+      symbol,
+      entryTs: { gte: new Date(from + 'T00:00:00Z'), lte: new Date(to + 'T23:59:59Z') },
+    }
+  } else {
+    return res.status(400).json({
+      success: false,
+      error: 'Provide either { backtestRunId } or { symbol, from, to }',
+    })
+  }
+
+  const trades = await db.trade.findMany({ where: tradeWhere, orderBy: { entryTs: 'asc' } })
+  if (trades.length === 0) return res.status(200).json({ success: true, data: { processed: 0, symbol: tradeSymbol } })
+
+  // Determine candle window spanning all trades (one batch query)
+  const minEntryTs = trades[0].entryTs
+  const maxExitTs  = trades.reduce<Date>((max, t) => {
+    const ts = t.exitTs ?? t.entryTs
+    return ts > max ? ts : max
+  }, trades[0].exitTs ?? trades[0].entryTs)
+
+  const allCandles = await db.candle.findMany({
+    where:   { symbol: tradeSymbol, timeframe: 'M5', timestampUtc: { gte: minEntryTs, lte: maxExitTs } },
+    orderBy: { timestampUtc: 'asc' },
+  })
+
+  let processed = 0
+
+  for (const trade of trades) {
+    const entryTMs = trade.entryTs.getTime()
+    const exitTMs  = trade.exitTs?.getTime() ?? Infinity
+
+    // Candles strictly after entry and up to (inclusive) exit, matching postSignalCandles convention
+    const tradeCandles = allCandles.filter(c => {
+      const ts = c.timestampUtc.getTime()
+      return ts > entryTMs && ts <= exitTMs
+    })
+
+    const result = computePathAnalysis(trade, tradeCandles)
+
+    await db.tradePathAnalysis.upsert({
+      where:  { tradeId: trade.id },
+      create: { tradeId: trade.id, ...result },
+      update: { ...result },
+    })
+
+    processed++
+  }
+
+  return res.status(200).json({ success: true, data: { processed, symbol: tradeSymbol } })
+}
+
+// ── GET trade-analysis-results ─────────────────────────────────────────────
+
+async function handleTradeAnalysisResults(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const symbol = req.query.symbol ? String(req.query.symbol) : undefined
+
+  const rows = await db.tradePathAnalysis.findMany({
+    where:   symbol ? { trade: { symbol } } : {},
+    include: { trade: { select: { result: true } } },
+  })
+
+  if (rows.length === 0) return res.status(200).json({ success: true, data: { count: 0 } })
+
+  const count    = rows.length
+  const avgMfeR  = rows.reduce((s, r) => s + (r.mfeR ?? 0), 0) / count
+  const avgMaeR  = rows.reduce((s, r) => s + (r.maeR ?? 0), 0) / count
+  const pct1r    = (rows.filter(r => r.reached1r).length / count) * 100
+  const pct2r    = (rows.filter(r => r.reached2r).length / count) * 100
+  const pct3r    = (rows.filter(r => r.reached3r).length / count) * 100
+  const beHelped = rows.filter(r => r.breakEvenWouldHelp).length
+
+  const with1rTime   = rows.filter(r => r.timeTo1rMinutes !== null)
+  const avgTimeTo1r  = with1rTime.length > 0
+    ? Math.round(with1rTime.reduce((s, r) => s + (r.timeTo1rMinutes ?? 0), 0) / with1rTime.length)
+    : null
+
+  const avgExitMins  = rows.filter(r => r.timeToExitMinutes !== null).reduce((s, r) => s + (r.timeToExitMinutes ?? 0), 0)
+  const avgExitCount = rows.filter(r => r.timeToExitMinutes !== null).length
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      count,
+      avgMfeR:              r2(avgMfeR),
+      avgMaeR:              r2(avgMaeR),
+      pctReaching1r:        r1(pct1r),
+      pctReaching2r:        r1(pct2r),
+      pctReaching3r:        r1(pct3r),
+      breakEvenWouldHelp:   { count: beHelped, pct: r1((beHelped / count) * 100) },
+      avgTimeTo1rMinutes:   avgTimeTo1r,
+      avgTimeToExitMinutes: avgExitCount > 0 ? Math.round(avgExitMins / avgExitCount) : null,
+    },
+  })
+}
+
+function r2(n: number) { return Math.round(n * 100) / 100 }
+function r1(n: number) { return Math.round(n * 10)  / 10  }

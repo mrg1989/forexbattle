@@ -655,7 +655,7 @@ No CLI seed tool needed. Implemented as idempotent admin endpoints (consistent w
 
 ---
 
-## Stage 5: Crossfire Setup Engine ⏳ NOT STARTED
+## Stage 5: Crossfire Setup Engine ✅ COMPLETE
 
 ### Objective
 For every trading day in the candle database, detect the 13:00 UK setup candle, compute
@@ -746,7 +746,7 @@ days are recorded with a reason code. The admin page surfaces the detection stat
 
 ---
 
-## Stage 6: Signal Detection and Trade Simulation ⏳ NOT STARTED
+## Stage 6: Signal Detection and Trade Simulation ✅ COMPLETE
 
 ### Objective
 Walk M5 candles in the 13:00–16:00 UK trading window for each valid setup. Detect breakout
@@ -858,70 +858,111 @@ The existing chart backtest path is untouched.
 
 ---
 
-## Stage 7: MFE and MAE Tracking ⏳ NOT STARTED
+## Stage 7: MFE and MAE Tracking ⏳ IN PROGRESS
+
+### Architecture Note (deviation from original plan)
+The trading-research Next.js app was not created (Stage 1 architectural deviation — the
+Forex Battle Vite/Vercel app was converted in place instead). All server-side code lives
+in `api/_lib/` and all admin endpoints are consolidated in `api/admin.ts` with `?action=`
+routing to stay within Vercel Hobby's 12-function limit.
 
 ### Objective
-For every trade in the database, scan M5 candles from entry onward and record how far price
-moved in the trader's favour (MFE) and against them (MAE) in R-multiples. Record which R
-milestones were reached and whether a break-even rule would have changed the outcome.
+For every trade in the database, scan M5 candles from entry to exit and record:
+- MFE (maximum favourable excursion) and MAE (maximum adverse excursion) in price units and R-multiples
+- Which R milestones (1R, 2R, 3R) were first reached, and how long they took
+- Whether moving SL to break-even after 1R would have saved a losing trade
+- Time spent in trade (entry to exit in minutes)
+
+### Schema Coverage vs User Requirements
+
+The existing `trade_path_analysis` schema covers:
+
+| User requirement | Schema field | Notes |
+|---|---|---|
+| MFE in R | `mfe_r` | ✓ |
+| MAE in R | `mae_r` | ✓ |
+| MFE in pips | `mfe_pips` | Stored as raw price distance (not ×10000) |
+| MAE in pips | `mae_pips` | Stored as raw price distance (not ×10000) |
+| Time to 1R | `time_to_1r_minutes` | ✓ |
+| Time to TP (3R) | `time_to_3r_minutes` | ✓ (Crossfire v1 TP = 3R) |
+| Time to SL | `time_to_exit_minutes` | ✓ for loss trades (exit = SL) |
+| Time in trade | `time_to_exit_minutes` | ✓ |
+| Reached 1R / 2R / 3R | `reached_1r`, `reached_2r`, `reached_3r` | ✓ |
+| Break-even analysis | `break_even_would_help` | ✓ |
+| Reached 4R / 5R | — | Not in schema; derive from `mfe_r >= 4.0` in analytics |
+| Time to 2R | — | Not in schema; only 1R and 3R milestones stored |
+| % time positive/negative | — | Not in schema; requires schema extension |
 
 ### Files Affected
 ```
-trading-research/
-  src/
-    lib/
-      trade-path-analysis.ts            [NEW — computePathAnalysis()]
-    app/
-      api/
-        admin/
-          run-path-analysis/
-            route.ts                    [POST: compute MFE/MAE for a backtest run]
+api/
+  _lib/
+    trade-path-analysis.ts             [NEW — computePathAnalysis() pure function]
+  admin.ts                             [UPDATED — add run-trade-analysis, trade-analysis-results]
 ```
 
 ### Database Changes
 Populates `trade_path_analysis`. No schema changes.
 
+### Admin Endpoints
+```
+POST /api/admin?action=run-trade-analysis
+  Body: { backtestRunId }  OR  { symbol, from, to }
+  Loads all trades in scope. Batch-loads M5 candles in one query.
+  Upserts trade_path_analysis on tradeId (idempotent).
+
+GET  /api/admin?action=trade-analysis-results[&symbol=EUR_USD]
+  Returns aggregate stats: avg MFE/MAE R, milestone pcts, break-even count.
+```
+
 ### Dependencies
 - Stage 6 complete (`trades` table populated)
-- Stage 3 complete (M5 candles available for post-entry scanning)
+- Stage 3 complete (M5 candles available for the trade window)
 
 ### Implementation Detail
 
-**`lib/trade-path-analysis.ts`**:
+**`api/_lib/trade-path-analysis.ts`** — pure function, no DB access:
 ```typescript
-export async function computePathAnalysis(
-  trade: Trade
-): Promise<TradePathAnalysis>
+export function computePathAnalysis(
+  trade: Trade,
+  tradeCandles: Candle[],  // M5, timestampUtc > entryTs and <= exitTs, ascending
+): PathAnalysisResult
 ```
 
-Steps:
-1. Load M5 candles from `entry_time_utc` through `exit_time_utc` + 10 candle buffer.
-2. Track `maxFavourablePrice` and `maxAdversePrice` candle by candle.
-3. Convert to R: `mfe_r = (maxFavourablePrice - entry) / riskPips` (for buy trades).
-4. Set milestone flags: `reached_1r = mfe_r >= 1.0`, `reached_2r = mfe_r >= 2.0`, etc.
-5. Simulate break-even: if SL moved to breakeven at 1R, would the trade result change?
-   Set `would_be_have_helped = true` if original result was `loss` but MFE crossed 1R first.
-6. Record `time_to_1r_minutes` as elapsed minutes from entry to when 1R was first reached.
-7. Upsert into `trade_path_analysis`.
+Scan logic:
+1. Track `maxHigh` / `minLow` across all trade candles in a single sequential pass.
+2. For buy: `mfePips = max(0, maxHigh − entry)`, `maePips = max(0, entry − minLow)`.
+3. For sell: `mfePips = max(0, entry − minLow)`, `maePips = max(0, maxHigh − entry)`.
+4. Running-max pass tracks when MFE first crossed 1R and 3R → `timeTo1rMinutes`, `timeTo3rMinutes`.
+5. `breakEvenWouldHelp = (result === 'loss') && (mfeR >= 1.0)` — price reached 1R before SL.
+
+Batch loading in `run-trade-analysis`:
+- One query for all target trades.
+- One query for M5 candles between `min(entryTs)` and `max(exitTs)`.
+- Filter to each trade's window in memory (`ts > entryTs && ts <= exitTs`).
+- Upsert per trade via `tradeId` unique key. No N+1 queries.
 
 ### Validation Criteria
-1. Run path analysis for all 2024 EUR_USD trades.
-2. Every `trades` row has a linked `trade_path_analysis` row.
+1. Run path analysis for the 2024-01-08 to 2024-01-12 test trades (3 trades from Stage 6).
+2. Every `trades` row has a linked `trade_path_analysis` row (`trade-analysis-results` count = 3).
 3. Known winning trade: `reached_3r = true`, `mfe_r >= 3.0`.
 4. Known losing trade: `mae_r >= 1.0` (SL was hit at 1R adverse).
-5. `SELECT AVG(mfe_r) FROM trade_path_analysis JOIN trades ON trade_id = trades.id
-   WHERE trades.result = 'win'` ≥ the configured RR (3.0 for trades that hit TP).
-6. `would_be_have_helped`: for a losing trade where MFE crossed 1R before SL, flag = true.
+5. `mfe_r` for all winning trades ≥ 3.0 (Crossfire v1 TP = 3R).
+6. `break_even_would_help = true` on any losing trade whose `mfe_r >= 1.0`.
 
 ### Risks
-- **Memory.** 48 hours of M5 candles = 576 candles per trade. For 1000+ trades, process in
-  batches of 100 to avoid Vercel memory limits.
-- **Exit candle double-count.** Stop the MFE/MAE scan at the exit candle (inclusive), not
-  beyond it.
+- **Candle window boundary.** Path analysis starts from the first M5 candle AFTER the
+  signal candle (`ts > entryTs`), matching the trade simulation's `postSignalCandles`.
+  Including the signal candle would double-count price movement that happened before entry.
+- **Open trades.** `exitTs` is set for all trades including open ones (last session candle).
+  The scan uses `exitTs` as the upper bound for all trade types.
+- **4R/5R in analytics (Stage 8).** These can be derived in the analytics layer from
+  `mfe_r >= 4.0` — no separate boolean stored.
 
 ### Expected Outcome
-Every trade has a path analysis row. The analytics engine can now answer: should we use
-break-even? Are stops too tight? Is 1:3 R:R realistic?
+Every trade has a path analysis row. The analytics engine (Stage 8) can answer: should we
+use break-even? Are stops too tight? Is 1:3 R:R realistic? What % of trades reached each
+milestone before stopping out?
 
 ---
 

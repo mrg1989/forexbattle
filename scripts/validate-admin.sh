@@ -150,6 +150,16 @@ run_tests() {
   echo "  HTTP $STATUS"
   pretty_body
   if [[ "$STATUS" == "200" ]] && check_success; then pass; else fail "HTTP $STATUS or success!=true"; fi
+
+  # --- ftmo-results (returns empty list if none run yet — still success) ---
+  echo ""
+  echo "────────────────────────────────────────"
+  echo "  TEST: action=ftmo-results"
+  echo "────────────────────────────────────────"
+  curl_request GET "$BASE?action=ftmo-results&symbol=EUR_USD"
+  echo "  HTTP $STATUS"
+  pretty_body
+  if [[ "$STATUS" == "200" ]] && check_success; then pass; else fail "HTTP $STATUS or success!=true"; fi
 }
 
 run_tests
@@ -205,6 +215,26 @@ curl -X POST "$BASE?action=run-trade-analysis" \
   -H "Authorization: Bearer $ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"symbol":"EUR_USD","from":"2024-01-08","to":"2024-01-12"}'
+
+# Run analytics (requires trade path analysis first; replace ID):
+curl -X POST "$BASE?action=run-analytics" \
+  -H "Authorization: Bearer $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"backtestRunId":"<id-from-run-backtest-response>"}'
+
+# Retrieve analytics summaries (replace ID):
+curl "$BASE?action=analytics-results&backtestRunId=<id>" \
+  -H "Authorization: Bearer $ADMIN_SECRET"
+
+# Run FTMO evaluation — 8% and 10% targets (replace ID):
+curl -X POST "$BASE?action=run-ftmo-evaluation" \
+  -H "Authorization: Bearer $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"backtestRunId":"<id-from-run-backtest-response>"}'
+
+# Retrieve FTMO results:
+curl "$BASE?action=ftmo-results&symbol=EUR_USD" \
+  -H "Authorization: Bearer $ADMIN_SECRET"
 CMDS
 
 echo ""

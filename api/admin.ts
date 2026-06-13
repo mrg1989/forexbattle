@@ -24,6 +24,10 @@ import { runSetupDetectionForRange } from './_lib/crossfire-setup.js'
 import { detectSignal } from './_lib/signal-detection.js'
 import { simulateTrade } from './_lib/trade-simulation.js'
 import { computePathAnalysis } from './_lib/trade-path-analysis.js'
+import { computeAllSummaries } from './_lib/analytics.js'
+import type { TradeRecord } from './_lib/analytics.js'
+import { simulateFtmo } from './_lib/ftmo.js'
+import type { FtmoConfig } from './_lib/ftmo.js'
 import { toUKHour, toUKDateString } from './_lib/time.js'
 
 const ALLOWED_SYMBOLS    = ['EUR_USD', 'GBP_USD']
@@ -49,12 +53,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'setup-counts':         return await handleSetupCounts(req, res)
       case 'run-backtest':          return await handleRunBacktest(req, res)
       case 'backtest-results':      return await handleBacktestResults(req, res)
-      case 'run-trade-analysis':    return await handleRunTradeAnalysis(req, res)
+      case 'run-trade-analysis':     return await handleRunTradeAnalysis(req, res)
       case 'trade-analysis-results': return await handleTradeAnalysisResults(req, res)
+      case 'run-analytics':          return await handleRunAnalytics(req, res)
+      case 'analytics-results':      return await handleAnalyticsResults(req, res)
+      case 'run-ftmo-evaluation':    return await handleRunFtmoEvaluation(req, res)
+      case 'ftmo-results':           return await handleFtmoResults(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results`,
         })
     }
   } catch (err) {
@@ -489,3 +497,183 @@ async function handleTradeAnalysisResults(req: VercelRequest, res: VercelRespons
 
 function r2(n: number) { return Math.round(n * 100) / 100 }
 function r1(n: number) { return Math.round(n * 10)  / 10  }
+
+// ── POST run-analytics ─────────────────────────────────────────────────────
+
+async function handleRunAnalytics(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { backtestRunId } = req.body ?? {}
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId is required' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: String(backtestRunId) } })
+  if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const rawTrades = await db.trade.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { entryTs: 'asc' },
+    include: {
+      pathAnalysis: true,
+      signal:       { select: { breakoutType: true } },
+    },
+  })
+
+  const trades: TradeRecord[] = rawTrades.map(t => ({
+    id:           t.id,
+    direction:    t.direction,
+    entryTs:      t.entryTs,
+    result:       t.result,
+    profitLossR:  t.profitLossR,
+    breakoutType: t.signal?.breakoutType ?? 'unknown',
+    pathAnalysis: t.pathAnalysis ? {
+      mfeR:               t.pathAnalysis.mfeR,
+      maeR:               t.pathAnalysis.maeR,
+      reached1r:          t.pathAnalysis.reached1r,
+      reached2r:          t.pathAnalysis.reached2r,
+      reached3r:          t.pathAnalysis.reached3r,
+      timeTo1rMinutes:    t.pathAnalysis.timeTo1rMinutes,
+      timeToExitMinutes:  t.pathAnalysis.timeToExitMinutes,
+      breakEvenWouldHelp: t.pathAnalysis.breakEvenWouldHelp,
+    } : null,
+  }))
+
+  const summaries = computeAllSummaries(trades)
+  let processed = 0
+
+  for (const [summaryType, summaryJson] of Object.entries(summaries)) {
+    await db.analyticsSummary.upsert({
+      where:  { backtestRunId_summaryType: { backtestRunId: run.id, summaryType } },
+      create: { backtestRunId: run.id, summaryType, summaryJson },
+      update: { summaryJson },
+    })
+    processed++
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: { backtestRunId: run.id, tradeCount: trades.length, summariesGenerated: processed },
+  })
+}
+
+// ── GET analytics-results ──────────────────────────────────────────────────
+
+async function handleAnalyticsResults(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const rows = await db.analyticsSummary.findMany({
+    where:   { backtestRunId },
+    orderBy: { summaryType: 'asc' },
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: rows.map(r => ({ summaryType: r.summaryType, summaryJson: r.summaryJson, createdAt: r.createdAt })),
+  })
+}
+
+// ── POST run-ftmo-evaluation ───────────────────────────────────────────────
+
+async function handleRunFtmoEvaluation(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { backtestRunId } = req.body ?? {}
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId is required' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: String(backtestRunId) } })
+  if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const sv = await db.strategyVersion.findUnique({ where: { id: run.strategyVersionId } })
+  const rrRatio = sv ? (sv.settingsJson as unknown as CrossfireSettings).riskReward ?? 3 : 3
+
+  const trades = await db.trade.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { entryTs: 'asc' },
+    select:  { entryTs: true, profitLossR: true },
+  })
+
+  const scenarios: FtmoConfig[] = [
+    { accountSize: 100_000, riskPercent: 0.01, rrRatio, dailyLossLimit: 0.05, maxDrawdownLimit: 0.10, profitTarget: 0.08 },
+    { accountSize: 100_000, riskPercent: 0.01, rrRatio, dailyLossLimit: 0.05, maxDrawdownLimit: 0.10, profitTarget: 0.10 },
+  ]
+
+  const results = []
+  for (const config of scenarios) {
+    const sim = simulateFtmo(trades, config)
+    const row = await db.fundedAccountTest.create({
+      data: {
+        strategyVersionId: run.strategyVersionId,
+        backtestRunId:     run.id,
+        accountSize:       config.accountSize,
+        riskPercent:       config.riskPercent,
+        rrRatio:           config.rrRatio,
+        dailyLossLimit:    config.dailyLossLimit,
+        maxDrawdownLimit:  config.maxDrawdownLimit,
+        passed:            sim.passed,
+        peakBalance:       sim.peakBalance,
+        worstDrawdown:     sim.worstDrawdown,
+        dailyBreachCount:  sim.dailyBreachCount,
+        failureReason:     sim.failureReason,
+        equityCurveJson:   sim.equityCurveJson as object,
+      },
+    })
+    results.push({
+      id:               row.id,
+      profitTarget:     config.profitTarget,
+      passed:           sim.passed,
+      failureReason:    sim.failureReason,
+      peakBalance:      sim.peakBalance,
+      worstDrawdown:    sim.worstDrawdown,
+      finalBalance:     sim.finalBalance,
+      dailyBreachCount: sim.dailyBreachCount,
+    })
+  }
+
+  const passCount = results.filter(r => r.passed).length
+
+  return res.status(200).json({
+    success: true,
+    data: { backtestRunId: run.id, tested: results.length, passCount, results },
+  })
+}
+
+// ── GET ftmo-results ───────────────────────────────────────────────────────
+
+async function handleFtmoResults(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  const symbol        = req.query.symbol        ? String(req.query.symbol)        : undefined
+
+  const where: Record<string, unknown> = {}
+  if (backtestRunId) where.backtestRunId = backtestRunId
+  if (symbol)        where.backtestRun   = { symbol }
+
+  const rows = await db.fundedAccountTest.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take:    20,
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: rows.map(r => ({
+      id:               r.id,
+      backtestRunId:    r.backtestRunId,
+      accountSize:      r.accountSize,
+      riskPercent:      r.riskPercent,
+      dailyLossLimit:   r.dailyLossLimit,
+      maxDrawdownLimit: r.maxDrawdownLimit,
+      passed:           r.passed,
+      peakBalance:      r.peakBalance,
+      worstDrawdown:    r.worstDrawdown,
+      dailyBreachCount: r.dailyBreachCount,
+      failureReason:    r.failureReason,
+      createdAt:        r.createdAt,
+      profitTarget:     (r.equityCurveJson as Record<string, unknown>)?.profitTarget ?? null,
+      finalBalance:     (r.equityCurveJson as Record<string, unknown>)?.finalBalance ?? null,
+    })),
+  })
+}

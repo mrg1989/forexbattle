@@ -16,10 +16,10 @@ Prerequisite reading: `trading_robot_rebuild_plan.md` (goals and requirements), 
 | 2 | Database Schema | ✅ Complete |
 | 3 | Candle Ingestion Worker | ✅ Complete |
 | 4 | Strategy Registry | ✅ Complete |
-| 5 | Crossfire Setup Engine | ⏳ Not Started |
-| 6 | Signal Detection + Trade Simulation | ⏳ Not Started |
-| 7 | MFE and MAE Tracking | ⏳ Not Started |
-| 8 | Analytics Engine + FTMO Simulation | ⏳ Not Started |
+| 5 | Crossfire Setup Engine | ✅ Complete |
+| 6 | Signal Detection + Trade Simulation | ✅ Complete |
+| 7 | MFE and MAE Tracking | ✅ Complete |
+| 8 | Analytics Engine + FTMO Simulation | ⏳ In Progress |
 | 9 | Chart + Trade Review Integration | ⏳ Not Started |
 | 10 | AI Research Layer | ⏳ Not Started |
 
@@ -858,7 +858,7 @@ The existing chart backtest path is untouched.
 
 ---
 
-## Stage 7: MFE and MAE Tracking ⏳ IN PROGRESS
+## Stage 7: MFE and MAE Tracking ✅ COMPLETE
 
 ### Architecture Note (deviation from original plan)
 The trading-research Next.js app was not created (Stage 1 architectural deviation — the
@@ -966,104 +966,132 @@ milestone before stopping out?
 
 ---
 
-## Stage 8: Analytics Engine and FTMO Simulation ⏳ NOT STARTED
+## Stage 8: Analytics Engine and FTMO Simulation ⏳ IN PROGRESS
+
+### Architecture Note (deviation from original plan)
+Same as Stage 7 — all server-side code lives in `api/_lib/` (not `trading-research/src/lib/`).
+Admin endpoints are consolidated in `api/admin.ts` with `?action=` routing.
+No frontend analytics dashboard is built in Stage 8 (out of scope per user requirements).
 
 ### Objective
-Produce clean, code-computed analytics from the trade database. No AI involved. Extract the
-FTMO equity logic from `AiAnalysisPanel.tsx` into a standalone pure function. Save all
-summary results to `analytics_summaries`. Build the analytics dashboard page.
+Produce clean, code-computed analytics from the trade and path-analysis database.
+Save six summary types to `analytics_summaries`. Simulate FTMO challenge rules
+for 8% and 10% profit targets and save results to `funded_account_tests`.
+
+### Schema Notes
+
+**`analytics_summaries`:** `@@unique([backtestRunId, summaryType])` — upsert on that key.
+One row per (backtestRun, summaryType). Re-running `run-analytics` overwrites with fresh data.
+
+**`funded_account_tests`:** No unique constraint — each call to `run-ftmo-evaluation` creates
+new rows (audit trail). Schema fields available: `accountSize`, `riskPercent`, `rrRatio`,
+`dailyLossLimit`, `maxDrawdownLimit`, `passed`, `peakBalance`, `worstDrawdown`, `dailyBreachCount`,
+`failureReason`, `equityCurveJson`. Note: no `profitTarget` column; stored in `equityCurveJson` metadata.
 
 ### Files Affected
 ```
-trading-research/
-  src/
-    lib/
-      analytics.ts                      [NEW — computeAnalyticsSummary()]
-      ftmo.ts                           [NEW — extracted from AiAnalysisPanel lines 128–180]
-    app/
-      api/
-        analytics/
-          [backtestRunId]/
-            route.ts                    [GET: analytics for a backtest run]
-        admin/
-          run-analytics/
-            route.ts                    [POST: compute + save analytics summaries]
-      analytics/
-        [backtestRunId]/
-          page.tsx                      [NEW — analytics dashboard]
-    components/
-      AiAnalysisPanel.tsx               [updated: FTMO block imports from lib/ftmo.ts]
+api/
+  _lib/
+    analytics.ts     [NEW — pure summary computation functions]
+    ftmo.ts          [NEW — pure FTMO simulation function]
+  admin.ts           [UPDATED — add run-analytics, analytics-results,
+                                run-ftmo-evaluation, ftmo-results]
 ```
 
 ### Database Changes
 Populates `analytics_summaries` and `funded_account_tests`. No schema changes.
 
+### Admin Endpoints
+```
+POST /api/admin?action=run-analytics        { backtestRunId }
+  Loads trades + pathAnalysis + signal.breakoutType.
+  Computes 6 summary types (pure functions).
+  Upserts each summary into analytics_summaries. Idempotent.
+
+GET  /api/admin?action=analytics-results    ?backtestRunId=xxx
+  Returns all analytics_summaries rows for that run.
+
+POST /api/admin?action=run-ftmo-evaluation  { backtestRunId }
+  Runs two FTMO simulations: 8% and 10% profit targets.
+  Creates 2 FundedAccountTest rows (audit trail, not idempotent).
+
+GET  /api/admin?action=ftmo-results         ?backtestRunId=xxx [OR ?symbol=EUR_USD]
+  Returns FundedAccountTest rows (latest 20).
+```
+
 ### Dependencies
 - Stage 6 complete (`trades` populated)
 - Stage 7 complete (`trade_path_analysis` populated for MFE/MAE stats)
 
+### Summary Types
+
+| summaryType | Key content |
+|---|---|
+| `overall` | totalTrades, wins, losses, winRatePct, avgR, expectancy, profitFactor, avgMfeR, avgMaeR, pctReaching1r–5r, breakEvenImprovementRate, avgTradeDurationMinutes |
+| `strategy_evaluation` | winRatePct, profitFactor, expectancy, maxDrawdownR, longestLosingStreak, longestWinningStreak, avgMonthlyR, avgYearlyR, monthlyBreakdown |
+| `mfe_mae_summary` | avgMfeR, avgMaeR, avgMfeRForWins, avgMaeRForLosses, pctReaching1r–5r, breakEvenWouldHelpPct, avgTimeTo1rMinutes |
+| `by_day_of_week` | monday–friday: wins, losses, winRatePct, totalR |
+| `by_entry_hour` | 13, 14, 15: wins, losses, winRatePct, totalR |
+| `by_breakout_type` | strong_body_close / weak_body_close: wins, losses, winRatePct |
+
+Notes on summary content:
+- `open` trades excluded from win/loss counts and winRatePct. Shown separately as `opens`.
+- 4R/5R reaching percentages derived from `mfeR >= 4.0` / `mfeR >= 5.0` — no separate DB field needed.
+- `profitFactor = grossWinR / grossLossR` (infinite if no losses; null if no trades).
+- `maxDrawdownR` computed from running equity curve in R units.
+
+### FTMO Simulation Parameters (both scenarios)
+- `accountSize`: 100,000
+- `riskPercent`: 1% (fixed risk per trade, not compounding)
+- `dailyLossLimit`: 5% of initial account
+- `maxDrawdownLimit`: 10% of initial account (absolute from start, not trailing from peak)
+- Scenario A `profitTarget`: 8%
+- Scenario B `profitTarget`: 10%
+
+`profitTarget` stored in `equityCurveJson` metadata (no dedicated schema column).
+
 ### Implementation Detail
 
-**`lib/analytics.ts`** — pure synchronous function, no DB reads, takes a trade array:
+**`api/_lib/analytics.ts`** — pure synchronous functions, no DB access:
 ```typescript
-export function computeAnalyticsSummary(
-  trades: TradeWithPathAnalysis[],
-  summaryType: AnalyticsSummaryType
-): AnalyticsSummary
+export interface TradeRecord { id, direction, entryTs, result, profitLossR, breakoutType, pathAnalysis }
+export function computeAllSummaries(trades: TradeRecord[]): Record<SummaryType, object>
 ```
 
-Summary types produced (one `analytics_summaries` row each):
-
-| summary_type | Key fields |
-|---|---|
-| `overall` | wins, losses, win_rate, expectancy, profit_factor, max_drawdown, longest_losing_streak, avg_trade_duration |
-| `by_symbol` | per symbol: win_rate, expectancy, trade_count |
-| `by_day_of_week` | Mon–Fri: win_rate, trade_count |
-| `by_entry_hour` | 13, 14, 15: win_rate, trade_count |
-| `by_breakout_type` | strong_body / weak_body / wick: win_rate, trade_count |
-| `mfe_mae_summary` | avg MFE@win, avg MAE@loss, pct reaching 1R/2R/3R, pct where BE helps |
-| `ftmo_simulation` | pass/fail, peak balance, max_drawdown, daily breach count |
-
-`open` trades (neither SL nor TP hit by 16:00 UK) are excluded from win/loss and expectancy
-calculations in all summary types.
-
-**`lib/ftmo.ts`** — extracted from AiAnalysisPanel:
+**`api/_lib/ftmo.ts`** — pure simulation:
 ```typescript
-export function computeFtmoEquityCurve(
-  trades: Trade[],
-  config: FtmoConfig
+export function simulateFtmo(
+  trades: { entryTs: Date, profitLossR: number | null }[],
+  config:  FtmoConfig
 ): FtmoResult
-// FtmoConfig: { startBalance, riskPercent, rrRatio, dailyLossLimit, maxDrawdownLimit }
-// FtmoResult: { curve: EquityPoint[], passed, failed, failureReason, breachIndex }
+// Fail on: absolute drawdown >= maxDrawdownLimit or daily loss >= dailyLossLimit
+// Pass on: balance >= accountSize * (1 + profitTarget) with no failure
 ```
 
-**Analytics dashboard page** renders: stat cards, day-of-week table, session time table,
-breakout type table, MFE/MAE summary, FTMO equity curve.
+**Batch loading in `run-analytics`:**
+One `db.trade.findMany` with `include: { pathAnalysis: true, signal: { select: { breakoutType } } }`.
+All computation is synchronous in memory. Upsert 6 rows after.
 
 ### Validation Criteria
-1. Run analytics for the 2024 EUR_USD backtest.
-2. `overall.win_rate` from `analytics_summaries` matches:
-   `SELECT COUNT(*) FILTER (WHERE result='win')::float / COUNT(*) FROM trades
-    WHERE backtest_run_id = '...' AND result != 'open'`
-3. `mfe_mae_summary.pct_reaching_1r` equals:
-   `SELECT COUNT(*) FILTER (WHERE reached_1r = true)::float / COUNT(*)
-    FROM trade_path_analysis WHERE trade_id IN (...)`
-4. FTMO simulation for £100,000 account, 1% risk, 1:3 RR — manually compute first 10 trades
-   and verify the balance progression matches.
-5. `AiAnalysisPanel.tsx` still compiles. The existing in-memory equity curve in the chart
-   sandbox continues to work (now importing from `lib/ftmo.ts`).
-6. Analytics dashboard renders without errors and shows all summary sections.
+1. Run analytics for the 2024-01-08 to 2024-01-12 backtest (3 trades). Response: `{ summariesGenerated: 6 }`.
+2. `analytics-results?backtestRunId=xxx` returns 6 rows (one per summaryType).
+3. `overall.winRatePct` from the returned JSON matches: `(wins / decidedTrades) × 100`.
+4. `mfe_mae_summary.pctReaching3r` matches `(trades with mfeR >= 3.0) / total × 100`.
+5. Re-running `run-analytics` with the same `backtestRunId` returns `{ summariesGenerated: 6 }` again
+   and row `createdAt` values do NOT change (upsert on update — only `summaryJson` changes).
+6. `run-ftmo-evaluation` returns 2 rows with distinct `profitTarget` values (8% and 10%).
 
 ### Risks
-- **Open trade exclusion.** Explicitly document that `open` trades are excluded from all
-  rate/expectancy calculations and show the open trade count separately on the dashboard.
-- **Performance.** For 1000+ trades, all summary computations must complete in < 2 seconds.
-  Keep `analytics.ts` as a pure synchronous function — no per-row async DB queries inside it.
+- **`open` trades in expectancy.** These have `profitLossR = 0` but are NOT included in
+  win/loss ratio calculations. They're tracked separately in the `overall.opens` field.
+- **Profit factor with no losses.** Guard against division by zero — return `null`.
+- **FTMO daily grouping.** Trades grouped by `toUKDateString(entryTs)`. A day with zero
+  trades has no entry in the equity curve (not an error).
 
 ### Expected Outcome
-A reproducible, database-backed analytics dashboard. FTMO pass/fail is no longer buried in
-a React component. Any backtest run can be re-analysed at any time by re-running the
-analytics job.
+Six analytics summary rows per backtest run, queryable by summaryType. Two FTMO simulation
+rows showing whether the strategy's backtest period would have passed a funded challenge.
+All analytics computable without modifying the trade simulation or strategy settings.
 
 ---
 

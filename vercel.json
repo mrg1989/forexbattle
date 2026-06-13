@@ -5,18 +5,11 @@
     { "source": "/api/ai/:path*",           "destination": "/api/ai"                        }
   ],
   "functions": {
-    "api/oanda-stream.ts":       { "maxDuration": 300 },
-    "api/ai.ts":                 { "maxDuration": 60  },
-    "api/oanda.ts":              { "maxDuration": 30  },
-    "api/admin/ingest.ts":       { "maxDuration": 300 },
-    "api/admin/candle-counts.ts": { "maxDuration": 30  },
-    "api/admin/seed-strategies.ts":{ "maxDuration": 30 },
-    "api/admin/strategies.ts":          { "maxDuration": 10  },
-    "api/admin/run-setup-detection.ts": { "maxDuration": 300 },
-    "api/admin/setup-counts.ts":        { "maxDuration": 10  },
-    "api/admin/run-backtest.ts":        { "maxDuration": 300 },
-    "api/admin/backtest-results.ts":    { "maxDuration": 30  },
-    "api/signal.ts":              { "maxDuration": 10  },
-    "api/rates.ts":              { "maxDuration": 10  }
+    "api/oanda-stream.ts": { "maxDuration": 300 },
+    "api/ai.ts":           { "maxDuration": 60  },
+    "api/oanda.ts":        { "maxDuration": 30  },
+    "api/admin.ts":        { "maxDuration": 300 },
+    "api/signal.ts":       { "maxDuration": 10  },
+    "api/rates.ts":        { "maxDuration": 10  }
   }
 }

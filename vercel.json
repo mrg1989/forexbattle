@@ -2,7 +2,8 @@
   "rewrites": [
     { "source": "/api/oanda-stream/:path*", "destination": "/api/oanda-stream?_path=:path*" },
     { "source": "/api/oanda/:path*",        "destination": "/api/oanda?_path=:path*"        },
-    { "source": "/api/ai/:path*",           "destination": "/api/ai"                        }
+    { "source": "/api/ai/:path*",           "destination": "/api/ai"                        },
+    { "source": "/((?!api/).*)",            "destination": "/index.html"                    }
   ],
   "functions": {
     "api/oanda-stream.ts": { "maxDuration": 300 },

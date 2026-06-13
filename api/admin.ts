@@ -12,8 +12,10 @@
  * POST /api/admin?action=run-setup-detection { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-backtest        { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-trade-analysis  { backtestRunId } OR { symbol, from, to }
- * POST /api/admin?action=run-ai-review        { backtestRunId }
- * GET  /api/admin?action=ai-review-results    ?backtestRunId=xxx
+ * GET  /api/admin?action=generate-ai-prompt    ?backtestRunId=xxx
+ * POST /api/admin?action=save-ai-review        { backtestRunId, responseText, aiModel? }
+ * POST /api/admin?action=run-ai-review          { backtestRunId }   (requires ANTHROPIC_API_KEY)
+ * GET  /api/admin?action=ai-review-results      ?backtestRunId=xxx
  * GET  /api/admin?action=recommendation-results ?backtestRunId=xxx [&status=suggested]
  */
 
@@ -64,13 +66,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'analytics-results':      return await handleAnalyticsResults(req, res)
       case 'run-ftmo-evaluation':    return await handleRunFtmoEvaluation(req, res)
       case 'ftmo-results':           return await handleFtmoResults(req, res)
+      case 'generate-ai-prompt':     return await handleGenerateAiPrompt(req, res)
+      case 'save-ai-review':         return await handleSaveAiReview(req, res)
       case 'run-ai-review':          return await handleRunAiReview(req, res)
       case 'ai-review-results':      return await handleAiReviewResults(req, res)
       case 'recommendation-results': return await handleRecommendationResults(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, run-ai-review, ai-review-results, recommendation-results`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, generate-ai-prompt, save-ai-review, run-ai-review, ai-review-results, recommendation-results`,
         })
     }
   } catch (err) {
@@ -881,5 +885,161 @@ async function handleRecommendationResults(req: VercelRequest, res: VercelRespon
       status:              r.status,
       createdAt:           r.createdAt,
     })),
+  })
+}
+
+// ── GET generate-ai-prompt ─────────────────────────────────────────────────
+// Builds the analytics prompt without calling Anthropic. Copy the returned
+// prompt into claude.ai, then POST the response to action=save-ai-review.
+
+async function handleGenerateAiPrompt(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: backtestRunId } })
+  if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const rawSummaries = await db.analyticsSummary.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { summaryType: 'asc' },
+  })
+  if (rawSummaries.length === 0)
+    return res.status(400).json({ success: false, error: 'No analytics summaries found. Run action=run-analytics first.' })
+
+  const rawFtmo = await db.fundedAccountTest.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { createdAt: 'desc' },
+    take:    4,
+  })
+
+  const sv = await db.strategyVersion.findUnique({ where: { id: run.strategyVersionId } })
+  if (!sv) return res.status(400).json({ success: false, error: 'Strategy version not found' })
+  const settings = sv.settingsJson as unknown as CrossfireSettings
+
+  const ftmoResults: FtmoInput[] = rawFtmo.map(r => ({
+    profitTarget:     (r.equityCurveJson as Record<string, unknown>)?.profitTarget as number | null ?? null,
+    passed:           r.passed,
+    peakBalance:      r.peakBalance,
+    worstDrawdown:    r.worstDrawdown,
+    dailyBreachCount: r.dailyBreachCount,
+    failureReason:    r.failureReason,
+    finalBalance:     (r.equityCurveJson as Record<string, unknown>)?.finalBalance as number | null ?? null,
+  }))
+
+  const prompt = buildPrompt({
+    backtestRunId:         run.id,
+    strategyVersionNumber: sv.versionNumber,
+    settings,
+    summaries:             rawSummaries.map(s => ({ summaryType: s.summaryType, summaryJson: s.summaryJson })),
+    ftmoResults,
+  })
+
+  // Indicate whether auto-review is available so a UI can show the right call-to-action
+  const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY)
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      prompt,
+      backtestRunId:     run.id,
+      strategyVersionId: sv.id,
+      summaryCount:      rawSummaries.length,
+      ftmoResultCount:   rawFtmo.length,
+      autoReviewAvailable: hasApiKey,
+    },
+  })
+}
+
+// ── POST save-ai-review ────────────────────────────────────────────────────
+// Accepts a pasted Claude response and saves it as if Anthropic had responded.
+// Use after copying the prompt from generate-ai-prompt and running it manually.
+
+async function handleSaveAiReview(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { backtestRunId, responseText, aiModel } = req.body ?? {}
+  if (!backtestRunId)  return res.status(400).json({ success: false, error: 'backtestRunId is required' })
+  if (!responseText || typeof responseText !== 'string' || responseText.trim().length === 0)
+    return res.status(400).json({ success: false, error: 'responseText is required and must be a non-empty string' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: String(backtestRunId) } })
+  if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const sv = await db.strategyVersion.findUnique({ where: { id: run.strategyVersionId } })
+  if (!sv) return res.status(400).json({ success: false, error: 'Strategy version not found' })
+  const settings = sv.settingsJson as unknown as CrossfireSettings
+
+  // Re-build the prompt so the stored review row has the full prompt/response pair
+  const rawSummaries = await db.analyticsSummary.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { summaryType: 'asc' },
+  })
+  if (rawSummaries.length === 0)
+    return res.status(400).json({ success: false, error: 'No analytics summaries found. Run action=run-analytics first.' })
+
+  const rawFtmo = await db.fundedAccountTest.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { createdAt: 'desc' },
+    take:    4,
+  })
+
+  const ftmoResults: FtmoInput[] = rawFtmo.map(r => ({
+    profitTarget:     (r.equityCurveJson as Record<string, unknown>)?.profitTarget as number | null ?? null,
+    passed:           r.passed,
+    peakBalance:      r.peakBalance,
+    worstDrawdown:    r.worstDrawdown,
+    dailyBreachCount: r.dailyBreachCount,
+    failureReason:    r.failureReason,
+    finalBalance:     (r.equityCurveJson as Record<string, unknown>)?.finalBalance as number | null ?? null,
+  }))
+
+  const prompt = buildPrompt({
+    backtestRunId:         run.id,
+    strategyVersionNumber: sv.versionNumber,
+    settings,
+    summaries:             rawSummaries.map(s => ({ summaryType: s.summaryType, summaryJson: s.summaryJson })),
+    ftmoResults,
+  })
+
+  const parsed = parseRecommendations(responseText.trim())
+
+  const review = await db.aiReview.create({
+    data: {
+      backtestRunId: run.id,
+      aiModel:       aiModel ? String(aiModel) : 'manual',
+      prompt,
+      response:      responseText.trim(),
+      recommendationsJson: parsed.length > 0 ? parsed as object[] : undefined,
+      tokenCount:    null,
+    },
+  })
+
+  let recCount = 0
+  for (const rec of parsed) {
+    const proposedSettings = { ...settings, ...rec.proposedSettingChange }
+    await db.strategyRecommendation.create({
+      data: {
+        aiReviewId:           review.id,
+        strategyVersionId:    sv.id,
+        proposedSettingsJson: proposedSettings as object,
+        rationale:            `${rec.filter}\n\n${rec.rationale}\n\nOverfitting risk: ${rec.overfittingRisk}`,
+        expectedBenefit:      rec.expectedBenefit,
+        status:               'suggested',
+      },
+    })
+    recCount++
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      reviewId:            review.id,
+      backtestRunId:       run.id,
+      aiModel:             review.aiModel,
+      recommendationCount: recCount,
+      parsedSuccessfully:  parsed.length > 0,
+    },
   })
 }

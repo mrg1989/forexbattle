@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { useLocation, Link } from 'react-router-dom'
 import { useOandaStream } from '../hooks/useOandaStream'
 import CandlestickChart from '../components/chart/CandlestickChart'
 import AiAnalysisPanel from '../components/AiAnalysisPanel'
@@ -8,6 +9,8 @@ import { CROSSFIRE_AI_DEFAULTS } from '../utils/strategies'
 import { runSmcBacktest, SMC_DEFAULTS } from '../utils/smcStrategy'
 import type { SmcSettings, SmcBacktestResult } from '../utils/smcStrategy'
 import type { Candle } from '../types'
+import { adminApi } from '../lib/adminApi'
+import type { TradeDetail, SetupDetail } from '../lib/adminApi'
 
 const TIMEFRAMES = [
   { label: '5s',  oanda: 'S5',  seconds: 5    },
@@ -28,6 +31,10 @@ const INSTRUMENT_MAP: Record<string,string> = {
   'EUR/USD':'EUR_USD','GBP/USD':'GBP_USD','USD/JPY':'USD_JPY',
   'AUD/USD':'AUD_USD','USD/CHF':'USD_CHF','XAU/USD':'XAU_USD',
 }
+// Reverse: DB symbol (EUR_USD) → display pair (EUR/USD)
+const SYMBOL_TO_PAIR: Record<string,string> = Object.fromEntries(
+  Object.entries(INSTRUMENT_MAP).map(([k,v]) => [v,k])
+)
 
 function toCandle(raw: {time:string;mid:{o:string;h:string;l:string;c:string};volume:number}): Candle {
   return {
@@ -61,9 +68,15 @@ function StatChip({ label, value, color }: { label: string; value: string; color
   )
 }
 
+// Restore pair/TF from localStorage, falling back to M5 (index 4) as the default for review use
+function getStoredPair()  { try { return localStorage.getItem('chart_pair')  || 'EUR/USD' } catch { return 'EUR/USD' } }
+function getStoredTfIdx() { try { return parseInt(localStorage.getItem('chart_tfIdx') ?? '4', 10) || 4 } catch { return 4 } }
+
 export default function ChartSandbox() {
-  const [pair,       setPair]       = useState('EUR/USD')
-  const [tfIdx,      setTfIdx]      = useState(1)
+  const location = useLocation()
+
+  const [pair,       setPair]       = useState(getStoredPair)
+  const [tfIdx,      setTfIdx]      = useState(getStoredTfIdx)
   const [candles,    setCandles]    = useState<Candle[]>([])
   const [liveCandle, setLiveCandle] = useState<Candle | null>(null)
   const [loading,    setLoading]    = useState(true)
@@ -101,6 +114,15 @@ export default function ChartSandbox() {
   const [liveSignal,      setLiveSignal]      = useState<LiveSignal | null>(null)
   const liveSignalSentRef = useRef<number>(0)  // timestamp of last signal sent — prevents duplicate POSTs
 
+  // Review mode — activated when navigating from Open On Chart
+  const [reviewMode,       setReviewMode]       = useState(false)
+  const [reviewDetail,     setReviewDetail]     = useState<TradeDetail | SetupDetail | null>(null)
+  const [reviewDetailType, setReviewDetailType] = useState<'trade' | 'setup' | null>(null)
+  const [reviewLoading,    setReviewLoading]    = useState(false)
+  const [initialTargetTs,  setInitialTargetTs]  = useState<number | undefined>(undefined)
+  const [useDbCandles,     setUseDbCandles]     = useState(false)
+  const [dbCandleInfo,     setDbCandleInfo]     = useState<string | null>(null) // e.g. "database" | "partial"
+
   const liveCandleRef     = useRef<Candle | null>(null)
   const candleStartRef    = useRef<number>(0)
   const histLoadingRef    = useRef(false)   // prevents duplicate history fetches
@@ -113,6 +135,55 @@ export default function ChartSandbox() {
   const { w: chartW, h: chartH } = useChartSize(chartRef)
 
   const tf = TIMEFRAMES[tfIdx]
+
+  // Persist pair + TF to localStorage on change
+  useEffect(() => { try { localStorage.setItem('chart_pair',  pair)          } catch {} }, [pair])
+  useEffect(() => { try { localStorage.setItem('chart_tfIdx', String(tfIdx)) } catch {} }, [tfIdx])
+
+  // Read URL params once on mount — handles Open On Chart navigation
+  useEffect(() => {
+    const params   = new URLSearchParams(location.search)
+    const sym      = params.get('symbol')   // e.g. EUR_USD
+    const date     = params.get('date')     // e.g. 2026-01-05
+    const tradeId  = params.get('tradeId')
+    const setupId  = params.get('setupId')
+
+    if (!sym && !date && !tradeId && !setupId) return
+
+    // Set symbol
+    if (sym && SYMBOL_TO_PAIR[sym]) setPair(SYMBOL_TO_PAIR[sym])
+
+    // Force M5 for review
+    const m5idx = TIMEFRAMES.findIndex(t => t.oanda === 'M5')
+    if (m5idx !== -1) setTfIdx(m5idx)
+
+    setReviewMode(true)
+    setUseDbCandles(true)
+
+    // Fetch trade or setup details from API
+    if (tradeId) {
+      setReviewLoading(true)
+      adminApi.getTrade(tradeId)
+        .then(d => {
+          setReviewDetail(d)
+          setReviewDetailType('trade')
+          if (d.entryTs) setInitialTargetTs(new Date(d.entryTs).getTime())
+        })
+        .catch(() => {})
+        .finally(() => setReviewLoading(false))
+    } else if (setupId) {
+      setReviewLoading(true)
+      adminApi.getSetup(setupId)
+        .then(d => {
+          setReviewDetail(d)
+          setReviewDetailType('setup')
+          setInitialTargetTs(new Date((d as SetupDetail).setupCandleTs).getTime())
+        })
+        .catch(() => {})
+        .finally(() => setReviewLoading(false))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -131,6 +202,62 @@ export default function ChartSandbox() {
     if (!instrument) return
     setLoading(true); setFetchErr(null); setCandles([]); setLiveCandle(null)
     liveCandleRef.current = null; setTickCount(0); setFirstPrice(null)
+    setDbCandleInfo(null)
+
+    // Review mode + DB candles: use the date from URL param (if set) to load candles from DB
+    const params = new URLSearchParams(location.search)
+    const reviewDate = params.get('date')
+
+    if (useDbCandles && reviewDate) {
+      // Fetch a 3-day window centred on the review date so we have context either side
+      const base    = new Date(reviewDate)
+      const fromDt  = new Date(base); fromDt.setDate(base.getDate() - 1)
+      const toDt    = new Date(base); toDt.setDate(base.getDate() + 1)
+      const fromStr = fromDt.toISOString().slice(0, 10)
+      const toStr   = toDt.toISOString().slice(0, 10)
+
+      adminApi.getCandles(instrument, tf.oanda, fromStr, toStr)
+        .then(d => {
+          setDbCandleInfo(d.source)
+          const raw = d.candles as Candle[]
+          if (raw.length === 0) throw new Error('No candles in DB for this date — try disabling DB mode')
+          setCandles(raw)
+          setLiveCandle(null)   // no live candle in review mode
+          setLoading(false)
+          histLoadingRef.current = false
+        })
+        .catch(e => {
+          // Fall back to OANDA if DB fetch fails
+          setDbCandleInfo('oanda-fallback')
+          const toTs = new Date(`${reviewDate}T18:00:00.000Z`).toISOString()
+          fetch(`/api/oanda/instruments/${instrument}/candles?count=300&to=${encodeURIComponent(toTs)}&granularity=${tf.oanda}&price=M`)
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+            .then(d => {
+              const raw: Candle[] = (d.candles ?? []).filter((c:{complete:boolean}) => c.complete).map(toCandle)
+              if (raw.length === 0) throw new Error(e.message)
+              setCandles(raw); setLiveCandle(null); setLoading(false)
+              histLoadingRef.current = false
+            })
+            .catch(e2 => { setFetchErr(e2.message); setLoading(false) })
+        })
+      return
+    }
+
+    // Standard mode: fetch latest candles from OANDA
+    // If a review date is set but DB mode is off, still load from OANDA around that date
+    if (reviewDate && !useDbCandles) {
+      const toTs = new Date(`${reviewDate}T18:00:00.000Z`).toISOString()
+      fetch(`/api/oanda/instruments/${instrument}/candles?count=300&to=${encodeURIComponent(toTs)}&granularity=${tf.oanda}&price=M`)
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+        .then(d => {
+          const raw: Candle[] = (d.candles ?? []).filter((c:{complete:boolean}) => c.complete).map(toCandle)
+          if (raw.length === 0) throw new Error('No candles returned')
+          setCandles(raw); setLiveCandle(null); setLoading(false)
+          histLoadingRef.current = false
+        })
+        .catch(e => { setFetchErr(e.message); setLoading(false) })
+      return
+    }
 
     fetch(`/api/oanda/instruments/${instrument}/candles?count=200&granularity=${tf.oanda}&price=M`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
@@ -148,7 +275,7 @@ export default function ChartSandbox() {
         histLoadingRef.current = false
       })
       .catch(e => { setFetchErr(e.message); setLoading(false) })
-  }, [pair, tfIdx])
+  }, [pair, tfIdx, useDbCandles])
 
   // ── Candle roll ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -362,7 +489,93 @@ export default function ChartSandbox() {
   }, [smcMode, deepSmcResult, candles, smcSettings, pair])
 
   // Merge overlays: AI strategy overlays replace crossfire ones when active
-  const allOverlays = smcMode ? smcOverlays : aiStrategyMode ? aiOverlays : chartOverlays
+  const baseOverlays = smcMode ? smcOverlays : aiStrategyMode ? aiOverlays : chartOverlays
+
+  // Build trendline + trade overlays from review detail when in review mode
+  const reviewOverlays = useMemo((): typeof chartOverlays => {
+    if (!reviewDetail) return []
+    const overlays: typeof chartOverlays = []
+
+    // Helper: evaluate line price at a given timestamp
+    const linePrice = (slope: number, intercept: number, originTs: number, ts: number) =>
+      intercept + slope * (ts - originTs)
+
+    // Extract setup geometry from either TradeDetail or SetupDetail
+    type SetupGeo = {
+      setupCandleTs: string | null; hhPrice: number | null; llPrice: number | null
+      greenLineSlope: number | null; greenLineIntercept: number | null; greenLineOriginTs: string | null
+      redLineSlope: number | null; redLineIntercept: number | null; redLineOriginTs: string | null
+    }
+    let setup: SetupGeo | null = null
+
+    if (reviewDetailType === 'trade') {
+      const t = reviewDetail as TradeDetail
+      if (t.greenLineSlope != null) setup = t as SetupGeo
+    } else if (reviewDetailType === 'setup') {
+      const s = reviewDetail as SetupDetail
+      if (s.greenLineSlope != null) setup = s as unknown as SetupGeo
+    }
+
+    if (setup !== null && setup.greenLineSlope != null && setup.greenLineOriginTs && setup.setupCandleTs) {
+      const originTs   = new Date(setup.greenLineOriginTs).getTime()
+      const sessionEnd = new Date(setup.setupCandleTs).getTime() + 3 * 3600 * 1000
+      const gs = setup
+      overlays.push({
+        x1Ms:  originTs,
+        y1:    linePrice(gs.greenLineSlope!, gs.greenLineIntercept!, originTs, originTs),
+        x2Ms:  sessionEnd,
+        y2:    linePrice(gs.greenLineSlope!, gs.greenLineIntercept!, originTs, sessionEnd),
+        color: '#22C55E', lineWidth: 1.5, label: 'Buy line',
+      })
+    }
+
+    if (setup !== null && setup.redLineSlope != null && setup.redLineOriginTs && setup.setupCandleTs) {
+      const originTs   = new Date(setup.redLineOriginTs).getTime()
+      const sessionEnd = new Date(setup.setupCandleTs).getTime() + 3 * 3600 * 1000
+      const gs = setup
+      overlays.push({
+        x1Ms:  originTs,
+        y1:    linePrice(gs.redLineSlope!, gs.redLineIntercept!, originTs, originTs),
+        x2Ms:  sessionEnd,
+        y2:    linePrice(gs.redLineSlope!, gs.redLineIntercept!, originTs, sessionEnd),
+        color: '#EF4444', lineWidth: 1.5, label: 'Sell line',
+      })
+    }
+
+    // Trade entry arrow + SL/TP lines
+    if (reviewDetailType === 'trade') {
+      const t = reviewDetail as TradeDetail
+      if (t.entryTs && t.entryPrice && t.slPrice && t.tpPrice) {
+        const entryTs = new Date(t.entryTs).getTime()
+        const exitTs  = t.exitTs ? new Date(t.exitTs).getTime() : entryTs + 3600_000
+
+        overlays.push({
+          x1Ms: entryTs, y1: t.entryPrice, x2Ms: entryTs, y2: t.entryPrice,
+          color: t.direction === 'buy' ? '#22C55E' : '#EF4444',
+          markerType: t.direction as 'buy' | 'sell',
+          tradeResult: (t.result === 'win' || t.result === 'loss') ? t.result as 'win' | 'loss' : undefined,
+        })
+
+        // SL line
+        overlays.push({
+          x1Ms: entryTs, y1: t.slPrice, x2Ms: exitTs, y2: t.slPrice,
+          color: '#EF444480', lineWidth: 1, dashPattern: [4, 4], label: 'SL',
+        })
+
+        // TP line
+        overlays.push({
+          x1Ms: entryTs, y1: t.tpPrice, x2Ms: exitTs, y2: t.tpPrice,
+          color: '#22C55E80', lineWidth: 1, dashPattern: [4, 4], label: 'TP',
+        })
+      }
+    }
+
+    return overlays
+  }, [reviewDetail, reviewDetailType])
+
+  const allOverlays = reviewMode
+    ? reviewOverlays
+    : smcMode ? smcOverlays : aiStrategyMode ? aiOverlays : chartOverlays
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const currentPrice = liveCandle?.close ?? 0
@@ -957,6 +1170,41 @@ export default function ChartSandbox() {
 
         <div className="flex-1" />
 
+        {/* ── DB Candles toggle (shown in review mode or when manually enabled) ── */}
+        <button
+          onClick={() => setUseDbCandles(v => !v)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex-shrink-0"
+          title={useDbCandles ? 'Using database candles — click to switch to live OANDA' : 'Using live OANDA candles — click to switch to database'}
+          style={{
+            background: useDbCandles ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.04)',
+            border: `1px solid ${useDbCandles ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.09)'}`,
+            color: useDbCandles ? '#22C55E' : 'rgba(241,241,255,0.35)',
+          }}>
+          <span style={{ fontSize: 9 }}>DB</span>
+          {useDbCandles && dbCandleInfo === 'partial' && (
+            <span style={{ fontSize: 8, color: 'rgba(245,158,11,0.8)' }}>partial</span>
+          )}
+          {!useDbCandles && (
+            <span style={{ fontSize: 8, color: 'rgba(241,241,255,0.2)' }}>off</span>
+          )}
+        </button>
+
+        <div className="w-px h-4 flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }} />
+
+        {/* ── Research Dashboard link ── */}
+        <Link
+          to="/research"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex-shrink-0"
+          style={{
+            background: 'rgba(139,92,246,0.1)',
+            border: '1px solid rgba(139,92,246,0.3)',
+            color: '#A78BFA',
+          }}>
+          Research
+        </Link>
+
+        <div className="w-px h-4 flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }} />
+
         {/* ── Right: price + status ── */}
         {!loading && (
           <div className="flex items-center gap-3 flex-shrink-0">
@@ -1168,11 +1416,38 @@ export default function ChartSandbox() {
           )}
         </div>
       )}
+      {/* ── Review mode banner ─────────────────────────────────────────────── */}
+      {reviewMode && (
+        <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 text-xs"
+             style={{ background: 'rgba(139,92,246,0.1)', borderBottom: '1px solid rgba(139,92,246,0.25)' }}>
+          <span className="font-bold" style={{ color: '#A78BFA' }}>Review mode</span>
+          <span style={{ color: 'rgba(241,241,255,0.45)' }}>
+            {useDbCandles
+              ? dbCandleInfo === 'partial' ? '⚠ Partial DB data — some candles from OANDA' : dbCandleInfo === 'oanda-fallback' ? 'DB miss — loaded from OANDA (will be saved next time)' : '✓ Database candles'
+              : 'Live OANDA candles (not exact backtest candles)'
+            }
+          </span>
+          <button
+            onClick={() => { setReviewMode(false); setReviewDetail(null); setReviewDetailType(null); setInitialTargetTs(undefined) }}
+            className="ml-auto text-[10px] px-2 py-0.5 rounded"
+            style={{ color: 'rgba(241,241,255,0.4)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            ✕ exit review
+          </button>
+        </div>
+      )}
+
       <div ref={chartRef} className="flex-1 min-h-0 relative">
         {loading && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: '#06061A' }}>
             <div className="w-8 h-8 rounded-full border-2 border-btl-purple border-t-transparent animate-spin" />
             <div className="text-sm text-btl-muted">Loading {pair} {tf.label} candles…</div>
+          </div>
+        )}
+        {reviewLoading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+               style={{ background: 'rgba(14,14,32,0.95)', border: '1px solid rgba(139,92,246,0.3)', color: '#A78BFA', zIndex: 20 }}>
+            <div className="w-3 h-3 rounded-full border border-btl-purple border-t-transparent animate-spin" />
+            Loading trade details…
           </div>
         )}
         {fetchErr && !loading && (
@@ -1193,8 +1468,97 @@ export default function ChartSandbox() {
             overlays={allOverlays}
             width={chartW}
             height={chartH}
+            initialTargetTs={initialTargetTs}
           />
         )}
+
+        {/* ── In-chart review card ────────────────────────────────────────── */}
+        {reviewDetail && !reviewLoading && (() => {
+          const isTradeDetail = reviewDetailType === 'trade'
+          const t = isTradeDetail ? reviewDetail as TradeDetail : null
+          const s = !isTradeDetail ? reviewDetail as SetupDetail : null
+
+          const dir     = (t?.direction ?? s?.signalDirection) as string | null
+          const result  = (t?.result ?? s?.tradeResult) as string | null
+          const resultColor = result === 'win' ? '#22C55E' : result === 'loss' ? '#EF4444' : result === 'open' ? '#F59E0B' : 'rgba(241,241,255,0.4)'
+
+          const ukTime = (iso: string | null | undefined) => {
+            if (!iso) return '—'
+            return new Intl.DateTimeFormat('en-GB', {
+              timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false,
+            }).format(new Date(iso))
+          }
+
+          const px = (v: number | null | undefined) => v != null ? v.toFixed(5) : '—'
+          const r  = (v: number | null | undefined) => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}R` : '—'
+
+          return (
+            <div className="absolute top-3 right-3 rounded-xl shadow-2xl text-xs"
+                 style={{
+                   background: 'rgba(10,10,26,0.97)',
+                   border: '1px solid rgba(139,92,246,0.3)',
+                   width: 220, zIndex: 25,
+                 }}>
+              {/* Header */}
+              <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: 'rgba(255,255,255,0.07)' }}>
+                <div className="flex items-center gap-1.5">
+                  {dir && (
+                    <span className="font-bold text-[10px] uppercase" style={{ color: dir === 'buy' ? '#22C55E' : '#EF4444' }}>
+                      {dir}
+                    </span>
+                  )}
+                  {result && (
+                    <span className="font-bold text-[10px] uppercase" style={{ color: resultColor }}>
+                      {result}
+                    </span>
+                  )}
+                </div>
+                <span className="font-mono text-[9px]" style={{ color: 'rgba(241,241,255,0.35)' }}>
+                  {t?.dateUk ?? s?.dateUk ?? ''}
+                </span>
+              </div>
+
+              {/* Fields */}
+              <div className="flex flex-col px-3 py-2 gap-1">
+                {t && <>
+                  <Row label="Signal"    value={ukTime(t.signalTs)} />
+                  <Row label="Entry"     value={ukTime(t.entryTs)} />
+                  <Row label="Entry px"  value={px(t.entryPrice)} />
+                  <Row label="SL"        value={px(t.slPrice)} color="#EF4444" />
+                  <Row label="TP"        value={px(t.tpPrice)} color="#22C55E" />
+                  {t.exitPrice != null && <Row label="Exit px"  value={px(t.exitPrice)} />}
+                  <div className="h-px my-0.5" style={{ background: 'rgba(255,255,255,0.07)' }} />
+                  <Row label="P/L"  value={r(t.profitLossR)} color={resultColor} />
+                  <Row label="MFE"  value={t.mfeR != null ? `${t.mfeR.toFixed(2)}R` : '—'} color="#22C55E" />
+                  <Row label="MAE"  value={t.maeR != null ? `${t.maeR.toFixed(2)}R` : '—'} color="#EF4444" />
+                  {t.breakEvenWouldHelp && (
+                    <span className="text-[9px] mt-1" style={{ color: '#F59E0B' }}>⚑ BE at 1R would have saved this</span>
+                  )}
+                </>}
+                {s && <>
+                  <Row label="Setup candle"  value={ukTime(s.setupCandleTs)} />
+                  <Row label="Prev high"     value={px(s.hhPrice)} color="#22C55E" />
+                  <Row label="Prev low"      value={px(s.llPrice)} color="#EF4444" />
+                  {s.signalDetected && <Row label="Signal" value={`${s.signalDirection ?? ''} @ ${ukTime(s.signalTs)}`} />}
+                  {s.tradeCreated && <>
+                    <div className="h-px my-0.5" style={{ background: 'rgba(255,255,255,0.07)' }} />
+                    <Row label="Entry px"  value={px(s.entryPrice)} />
+                    <Row label="P/L"  value={r(s.profitLossR)} color={resultColor} />
+                    <Row label="MFE"  value={s.mfeR != null ? `${s.mfeR.toFixed(2)}R` : '—'} color="#22C55E" />
+                    <Row label="MAE"  value={s.maeR != null ? `${s.maeR.toFixed(2)}R` : '—'} color="#EF4444" />
+                  </>}
+                </>}
+              </div>
+
+              {/* Footer: link back to research */}
+              <div className="px-3 py-2 border-t" style={{ borderColor: 'rgba(255,255,255,0.07)' }}>
+                <Link to="/research" className="text-[9px]" style={{ color: 'rgba(139,92,246,0.7)' }}>
+                  ← Back to Research Dashboard
+                </Link>
+              </div>
+            </div>
+          )
+        })()}
       </div>
 
       {/* ── Hint bar ──────────────────────────────────────────────────────────── */}
@@ -1229,5 +1593,14 @@ export default function ChartSandbox() {
       />
     )}
   </>
+  )
+}
+
+function Row({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span style={{ color: 'rgba(241,241,255,0.4)', fontSize: 10 }}>{label}</span>
+      <span className="font-mono" style={{ color: color ?? 'rgba(241,241,255,0.85)', fontSize: 10 }}>{value}</span>
+    </div>
   )
 }

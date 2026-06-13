@@ -84,6 +84,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'data-coverage':          return await handleDataCoverage(req, res)
       case 'import-plan':            return await handleImportPlan(req, res)
       case 'run-pipeline':           return await handleRunPipeline(req, res)
+      case 'get-candles':            return await handleGetCandles(req, res)
+      case 'get-trade':              return await handleGetTrade(req, res)
+      case 'get-setup':              return await handleGetSetup(req, res)
       default:
         return res.status(400).json({
           success: false,
@@ -1643,5 +1646,200 @@ async function handleSetupList(req: VercelRequest, res: VercelResponse) {
       tradeCreated:        s.signals.some(sig => sig.trade != null),
       tradeResult:         s.signals.find(sig => sig.trade != null)?.trade?.result ?? null,
     })),
+  })
+}
+
+// ── GET get-candles ────────────────────────────────────────────────────────
+// Returns OHLCV candles for a symbol/timeframe/date range from the database.
+// If the database has fewer than 20 candles for the range, automatically
+// ingests from OANDA and saves to DB before returning (fallback + persist).
+
+async function handleGetCandles(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const symbol    = req.query.symbol    ? String(req.query.symbol)    : undefined
+  const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined
+  const from      = req.query.from      ? String(req.query.from)      : undefined
+  const to        = req.query.to        ? String(req.query.to)        : undefined
+
+  if (!symbol || !timeframe || !from || !to)
+    return res.status(400).json({ success: false, error: 'symbol, timeframe, from, to are required' })
+  if (!ALLOWED_SYMBOLS.includes(symbol))
+    return res.status(400).json({ success: false, error: `symbol must be one of: ${ALLOWED_SYMBOLS.join(', ')}` })
+  if (!ALLOWED_TIMEFRAMES.includes(timeframe))
+    return res.status(400).json({ success: false, error: `timeframe must be one of: ${ALLOWED_TIMEFRAMES.join(', ')}` })
+  if (!DATE_RE.test(from) || !DATE_RE.test(to))
+    return res.status(400).json({ success: false, error: 'from and to must be YYYY-MM-DD' })
+
+  const fromDt = new Date(`${from}T00:00:00.000Z`)
+  const toDt   = new Date(`${to}T23:59:59.999Z`)
+
+  const fetchFromDb = () => db.candle.findMany({
+    where:   { symbol, timeframe, timestampUtc: { gte: fromDt, lte: toDt } },
+    orderBy: { timestampUtc: 'asc' },
+  })
+
+  let candles = await fetchFromDb()
+
+  // If fewer than 20 candles in DB for this range, ingest from OANDA then re-query
+  if (candles.length < 20) {
+    try {
+      await ingestCandles(symbol, timeframe, fromDt, toDt)
+      candles = await fetchFromDb()
+    } catch {
+      // Ingest failure is non-fatal — return whatever we have
+    }
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      source:  candles.length >= 20 ? 'database' : 'partial',
+      count:   candles.length,
+      candles: candles.map(c => ({
+        timestamp: c.timestampUtc.getTime(),
+        open:      c.open,
+        high:      c.high,
+        low:       c.low,
+        close:     c.close,
+        volume:    c.volume ?? 0,
+      })),
+    },
+  })
+}
+
+// ── GET get-trade ──────────────────────────────────────────────────────────
+// Returns a single trade by ID with path analysis and setup/signal details.
+
+async function handleGetTrade(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const tradeId = req.query.tradeId ? String(req.query.tradeId) : undefined
+  if (!tradeId) return res.status(400).json({ success: false, error: 'tradeId query param is required' })
+
+  const trade = await db.trade.findUnique({
+    where:   { id: tradeId },
+    include: {
+      pathAnalysis: true,
+      signal: {
+        include: {
+          setup: {
+            select: {
+              id:                 true,
+              dateUk:             true,
+              setupCandleTs:      true,
+              hhPrice:            true,
+              llPrice:            true,
+              greenLineSlope:     true,
+              greenLineIntercept: true,
+              greenLineOriginTs:  true,
+              redLineSlope:       true,
+              redLineIntercept:   true,
+              redLineOriginTs:    true,
+            },
+          },
+        },
+      },
+    },
+  })
+
+  if (!trade) return res.status(404).json({ success: false, error: `Trade ${tradeId} not found` })
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      id:                 trade.id,
+      symbol:             trade.symbol,
+      direction:          trade.direction,
+      entryTs:            trade.entryTs,
+      exitTs:             trade.exitTs,
+      entryPrice:         trade.entryPrice,
+      slPrice:            trade.slPrice,
+      tpPrice:            trade.tpPrice,
+      exitPrice:          trade.exitPrice,
+      result:             trade.result,
+      profitLossR:        trade.profitLossR,
+      breakoutType:       trade.signal?.breakoutType ?? null,
+      signalTs:           trade.signal?.signalTs ?? null,
+      dateUk:             trade.signal?.setup?.dateUk ?? null,
+      setupId:            trade.signal?.setup?.id ?? null,
+      setupCandleTs:      trade.signal?.setup?.setupCandleTs ?? null,
+      hhPrice:            trade.signal?.setup?.hhPrice ?? null,
+      llPrice:            trade.signal?.setup?.llPrice ?? null,
+      greenLineSlope:     trade.signal?.setup?.greenLineSlope ?? null,
+      greenLineIntercept: trade.signal?.setup?.greenLineIntercept ?? null,
+      greenLineOriginTs:  trade.signal?.setup?.greenLineOriginTs ?? null,
+      redLineSlope:       trade.signal?.setup?.redLineSlope ?? null,
+      redLineIntercept:   trade.signal?.setup?.redLineIntercept ?? null,
+      redLineOriginTs:    trade.signal?.setup?.redLineOriginTs ?? null,
+      mfeR:               trade.pathAnalysis?.mfeR ?? null,
+      maeR:               trade.pathAnalysis?.maeR ?? null,
+      reached1r:          trade.pathAnalysis?.reached1r ?? false,
+      timeTo1rMinutes:    trade.pathAnalysis?.timeTo1rMinutes ?? null,
+      timeToExitMinutes:  trade.pathAnalysis?.timeToExitMinutes ?? null,
+      breakEvenWouldHelp: trade.pathAnalysis?.breakEvenWouldHelp ?? false,
+    },
+  })
+}
+
+// ── GET get-setup ──────────────────────────────────────────────────────────
+// Returns a single setup by ID with signal and trade details.
+
+async function handleGetSetup(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const setupId = req.query.setupId ? String(req.query.setupId) : undefined
+  if (!setupId) return res.status(400).json({ success: false, error: 'setupId query param is required' })
+
+  const setup = await db.crossfireSetup.findUnique({
+    where:   { id: setupId },
+    include: {
+      signals: {
+        include: {
+          trade: {
+            include: { pathAnalysis: true },
+          },
+        },
+      },
+    },
+  })
+
+  if (!setup) return res.status(404).json({ success: false, error: `Setup ${setupId} not found` })
+
+  const signal = setup.signals[0] ?? null
+  const trade  = signal?.trade ?? null
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      id:                  setup.id,
+      symbol:              setup.symbol,
+      dateUk:              setup.dateUk,
+      setupValid:          setup.setupValid,
+      invalidReason:       setup.invalidReason,
+      setupCandleTs:       setup.setupCandleTs,
+      hhPrice:             setup.hhPrice,
+      llPrice:             setup.llPrice,
+      greenLineSlope:      setup.greenLineSlope,
+      greenLineIntercept:  setup.greenLineIntercept,
+      greenLineOriginTs:   setup.greenLineOriginTs,
+      redLineSlope:        setup.redLineSlope,
+      redLineIntercept:    setup.redLineIntercept,
+      redLineOriginTs:     setup.redLineOriginTs,
+      signalDetected:      signal != null,
+      signalDirection:     signal?.direction ?? null,
+      signalTs:            signal?.signalTs ?? null,
+      breakoutType:        signal?.breakoutType ?? null,
+      tradeCreated:        trade != null,
+      tradeId:             trade?.id ?? null,
+      tradeResult:         trade?.result ?? null,
+      entryPrice:          trade?.entryPrice ?? null,
+      slPrice:             trade?.slPrice ?? null,
+      tpPrice:             trade?.tpPrice ?? null,
+      exitPrice:           trade?.exitPrice ?? null,
+      profitLossR:         trade?.profitLossR ?? null,
+      mfeR:                trade?.pathAnalysis?.mfeR ?? null,
+      maeR:                trade?.pathAnalysis?.maeR ?? null,
+    },
   })
 }

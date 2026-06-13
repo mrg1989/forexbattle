@@ -739,6 +739,67 @@ const DATA_PROVENANCE = [
   { source: 'H1 / H4 / D1 candles',         usedFor: 'Planned — trend filter context (not yet active)' },
 ]
 
+const SETTINGS_LABELS: Record<string, string> = {
+  symbol:                  'Symbol',
+  setupTimeUK:             'Setup time (UK)',
+  lineTimeframe:           'Line timeframe',
+  entryTimeframe:          'Entry timeframe',
+  referenceStartTimeUK:    'Reference window start (UK)',
+  entryMode:               'Entry mode',
+  allowWickBreak:          'Allow wick break',
+  riskReward:              'Risk : Reward',
+  stopLossMode:            'Stop-loss mode',
+  takeProfitMode:          'Take-profit mode',
+  breakEvenAtR:            'Move to break-even at',
+  maxTradesPerDay:         'Max trades per day',
+  previousHighDefinition:  'Previous high definition',
+  previousLowDefinition:   'Previous low definition',
+  tradingWindowEndUK:      'Trading window end (UK)',
+  avoidNewsMinutesBefore:  'Avoid news (mins before)',
+  avoidNewsMinutesAfter:   'Avoid news (mins after)',
+}
+
+function fmtSettingValue(key: string, val: unknown): string {
+  if (val === null || val === undefined) return '—'
+  if (typeof val === 'boolean') return val ? 'Yes' : 'No'
+  if (key === 'riskReward') return `1 : ${val}`
+  if (key === 'breakEvenAtR') return `${val}R`
+  if (typeof val === 'string') return val.replace(/_/g, ' ')
+  return String(val)
+}
+
+function SettingsGrid({ settings }: { settings: Record<string, unknown> }) {
+  const entries = Object.entries(settings)
+  const known   = entries.filter(([k]) => k in SETTINGS_LABELS)
+  const unknown = entries.filter(([k]) => !(k in SETTINGS_LABELS))
+  return (
+    <div className="p-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
+        {known.map(([k, v]) => (
+          <div key={k} className="flex flex-col gap-0.5">
+            <span className="text-[9px] uppercase tracking-wide" style={{ color: 'rgba(241,241,255,0.35)' }}>
+              {SETTINGS_LABELS[k]}
+            </span>
+            <span className="text-xs font-mono" style={{ color: 'rgba(241,241,255,0.85)' }}>
+              {fmtSettingValue(k, v)}
+            </span>
+          </div>
+        ))}
+      </div>
+      {unknown.length > 0 && (
+        <details className="mt-4">
+          <summary className="text-[10px] cursor-pointer" style={{ color: 'rgba(241,241,255,0.3)' }}>
+            {unknown.length} additional field{unknown.length > 1 ? 's' : ''}
+          </summary>
+          <pre className="mt-2 text-[10px] font-mono" style={{ color: 'rgba(241,241,255,0.35)' }}>
+            {JSON.stringify(Object.fromEntries(unknown), null, 2)}
+          </pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
 function OverviewPanel({ detail, loading }: { detail: BacktestDetail | null; loading: boolean }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
 
@@ -794,9 +855,14 @@ function OverviewPanel({ detail, loading }: { detail: BacktestDetail | null; loa
           Strategy Settings Snapshot (v{detail.versionNumber})
         </button>
         {settingsOpen && (
-          <pre className="text-xs font-mono text-btl-muted bg-btl-bg/60 border border-btl-border rounded-xl p-4 overflow-x-auto">
-            {JSON.stringify(detail.settingsJson, null, 2)}
-          </pre>
+          <div className="rounded-xl border border-btl-border overflow-hidden" style={{ background: 'rgba(6,6,26,0.6)' }}>
+            <div className="px-4 py-2 border-b border-btl-border" style={{ background: 'rgba(139,92,246,0.07)' }}>
+              <p className="text-[10px]" style={{ color: 'rgba(241,241,255,0.35)' }}>
+                Read-only snapshot of the settings used in this backtest run. These settings cannot be changed here — to test different parameters, run a new backtest with a new strategy version.
+              </p>
+            </div>
+            <SettingsGrid settings={detail.settingsJson} />
+          </div>
         )}
       </section>
 
@@ -1119,25 +1185,38 @@ function SetupExplorer({ setups, loading }: { setups: SetupRow[]; loading: boole
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Summary chips */}
-      <div className="flex flex-wrap gap-3">
-        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
-          <span className="text-btl-muted">Total setups: </span>
-          <span className="text-btl-text font-medium">{setups.length}</span>
+      {/* Funnel summary */}
+      <div className="glass-md rounded-xl p-4">
+        <p className="text-[10px] text-btl-muted mb-3 uppercase tracking-wide">Setup funnel — each stage is a subset of the one above</p>
+        <div className="flex items-stretch gap-0">
+          {[
+            { label: 'Days checked',        value: setups.length,              sub: 'all trading days in range',        color: 'rgba(241,241,255,0.5)' },
+            { label: 'Setup available',     value: validCount,                 sub: 'pattern visible (HH + LL found)',  color: '#A78BFA' },
+            { label: 'Signal detected',     value: signalCount,                sub: 'breakout of green/red line',       color: '#60A5FA' },
+            { label: 'Trade created',       value: tradeCount,                 sub: 'entry conditions met',             color: '#22C55E' },
+          ].map((stage, i, arr) => (
+            <div key={stage.label} className="flex items-stretch">
+              <div className="flex flex-col items-center px-4 py-2 min-w-[120px]">
+                <span className="text-2xl font-bold font-mono" style={{ color: stage.color }}>{stage.value}</span>
+                <span className="text-[11px] font-medium mt-0.5" style={{ color: stage.color }}>{stage.label}</span>
+                <span className="text-[9px] text-center mt-0.5" style={{ color: 'rgba(241,241,255,0.35)' }}>{stage.sub}</span>
+              </div>
+              {i < arr.length - 1 && (
+                <div className="flex items-center self-center text-btl-faint text-sm px-1">→</div>
+              )}
+            </div>
+          ))}
         </div>
-        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
-          <span className="text-btl-muted">Valid: </span>
-          <span className="text-btl-up font-medium">{validCount}</span>
-          <span className="text-btl-muted"> · Invalid: </span>
-          <span className="text-btl-down font-medium">{setups.length - validCount}</span>
-        </div>
-        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
-          <span className="text-btl-muted">Signal detected: </span>
-          <span className="text-btl-text font-medium">{signalCount}</span>
-        </div>
-        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
-          <span className="text-btl-muted">Trade created: </span>
-          <span className="text-btl-text font-medium">{tradeCount}</span>
+        <div className="mt-3 pt-3 border-t border-white/5 flex gap-4 text-[10px]">
+          <span style={{ color: 'rgba(241,241,255,0.35)' }}>
+            <span style={{ color: '#EF4444' }}>{setups.length - validCount}</span> days had no valid setup (no 13:00 candle or geometry issue)
+          </span>
+          <span style={{ color: 'rgba(241,241,255,0.35)' }}>
+            <span style={{ color: 'rgba(241,241,255,0.5)' }}>{validCount - signalCount}</span> valid setups had no price breakout
+          </span>
+          <span style={{ color: 'rgba(241,241,255,0.35)' }}>
+            <span style={{ color: 'rgba(241,241,255,0.5)' }}>{signalCount - tradeCount}</span> signals filtered out (entry conditions not met)
+          </span>
         </div>
       </div>
 
@@ -1579,14 +1658,23 @@ function RunItem({ run, selected, onClick }: { run: BacktestRun; selected: boole
 
 type Tab = 'overview' | 'trades' | 'setups' | 'analytics' | 'ftmo' | 'ai' | 'recommendations'
 
+function getStoredRunId(): string | null { try { return localStorage.getItem('research_runId') } catch { return null } }
+function getStoredTab(): Tab {
+  try {
+    const t = localStorage.getItem('research_tab')
+    const valid: Tab[] = ['overview', 'trades', 'setups', 'analytics', 'ftmo', 'ai', 'recommendations']
+    return valid.includes(t as Tab) ? (t as Tab) : 'overview'
+  } catch { return 'overview' }
+}
+
 export default function ResearchDashboard() {
   const [runs, setRuns] = useState<BacktestRun[]>([])
   const [runsLoading, setRunsLoading] = useState(true)
   const [runsError, setRunsError] = useState<string | null>(null)
 
   const [showPipeline, setShowPipeline] = useState(false)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<Tab>('overview')
+  const [selectedId, setSelectedId] = useState<string | null>(getStoredRunId)
+  const [activeTab, setActiveTab] = useState<Tab>(getStoredTab)
 
   const [summaries, setSummaries]         = useState<AnalyticsSummary[]>([])
   const [ftmoResults, setFtmoResults]     = useState<FtmoResult[]>([])
@@ -1598,6 +1686,10 @@ export default function ResearchDashboard() {
   const [dataLoading, setDataLoading]     = useState(false)
 
   const secretMissing = !(import.meta.env.VITE_ADMIN_SECRET as string | undefined)
+
+  // Persist selection and tab to localStorage
+  useEffect(() => { try { if (selectedId) localStorage.setItem('research_runId', selectedId) } catch {} }, [selectedId])
+  useEffect(() => { try { localStorage.setItem('research_tab', activeTab) } catch {} }, [activeTab])
 
   // Load runs on mount
   useEffect(() => {
@@ -1639,6 +1731,18 @@ export default function ResearchDashboard() {
       setDataLoading(false)
     }
   }, [])
+
+  // When runs finish loading, auto-restore the previously selected run
+  useEffect(() => {
+    if (runsLoading || runs.length === 0 || !selectedId) return
+    if (runs.some(r => r.id === selectedId)) {
+      loadRunData(selectedId)
+    } else {
+      setSelectedId(null)
+      try { localStorage.removeItem('research_runId') } catch {}
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runsLoading])
 
   const selectRun = (id: string) => {
     setShowPipeline(false)

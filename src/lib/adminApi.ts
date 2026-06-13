@@ -157,6 +157,70 @@ export interface SetupRow {
   tradeResult: string | null
 }
 
+export interface TradeDetail {
+  id: string
+  symbol: string
+  direction: string
+  entryTs: string
+  exitTs: string | null
+  entryPrice: number
+  slPrice: number
+  tpPrice: number
+  exitPrice: number | null
+  result: string
+  profitLossR: number | null
+  breakoutType: string | null
+  signalTs: string | null
+  dateUk: string | null
+  setupId: string | null
+  setupCandleTs: string | null
+  hhPrice: number | null
+  llPrice: number | null
+  greenLineSlope: number | null
+  greenLineIntercept: number | null
+  greenLineOriginTs: string | null
+  redLineSlope: number | null
+  redLineIntercept: number | null
+  redLineOriginTs: string | null
+  mfeR: number | null
+  maeR: number | null
+  reached1r: boolean
+  timeTo1rMinutes: number | null
+  timeToExitMinutes: number | null
+  breakEvenWouldHelp: boolean
+}
+
+export interface SetupDetail {
+  id: string
+  symbol: string
+  dateUk: string
+  setupValid: boolean
+  invalidReason: string | null
+  setupCandleTs: string
+  hhPrice: number
+  llPrice: number
+  greenLineSlope: number
+  greenLineIntercept: number
+  greenLineOriginTs: string
+  redLineSlope: number
+  redLineIntercept: number
+  redLineOriginTs: string
+  signalDetected: boolean
+  signalDirection: string | null
+  signalTs: string | null
+  breakoutType: string | null
+  tradeCreated: boolean
+  tradeId: string | null
+  tradeResult: string | null
+  entryPrice: number | null
+  slPrice: number | null
+  tpPrice: number | null
+  exitPrice: number | null
+  profitLossR: number | null
+  mfeR: number | null
+  maeR: number | null
+}
+
 export interface CoverageRow {
   symbol: string
   timeframe: string
@@ -271,4 +335,15 @@ export const adminApi = {
 
   runPipeline: (symbol: string, from: string, to: string) =>
     req<PipelineResult>('POST', 'run-pipeline', {}, { symbol, from, to }),
+
+  getCandles: (symbol: string, timeframe: string, from: string, to: string) =>
+    req<{ source: string; count: number; candles: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[] }>(
+      'GET', 'get-candles', { symbol, timeframe, from, to },
+    ),
+
+  getTrade: (tradeId: string) =>
+    req<TradeDetail>('GET', 'get-trade', { tradeId }),
+
+  getSetup: (setupId: string) =>
+    req<SetupDetail>('GET', 'get-setup', { setupId }),
 }

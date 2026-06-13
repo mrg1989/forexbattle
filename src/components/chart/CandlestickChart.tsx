@@ -15,6 +15,7 @@ interface CandlestickChartProps {
   zoomPips?: number
   onNeedHistory?: (beforeMs: number) => void
   overlays?: LineOverlay[]
+  initialTargetTs?: number  // when set, chart pans to centre this timestamp on first render
 }
 
 const NEON_UP   = '#22C55E'
@@ -25,7 +26,7 @@ const PR = 72, PT = 14, PL = 4, PB = 22, VOL = 0.12
 
 export default function CandlestickChart({
   candles, liveCandle, pair, predictionPrice, phase,
-  width, height, zoomPips, onNeedHistory, overlays,
+  width, height, zoomPips, onNeedHistory, overlays, initialTargetTs,
 }: CandlestickChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -39,8 +40,11 @@ export default function CandlestickChart({
   })
 
   // Always-current props ref — safe to read from event handlers
-  const pr = useRef({ candles, liveCandle, pair, predictionPrice, phase, width, height, zoomPips, onNeedHistory, overlays })
-  pr.current = { candles, liveCandle, pair, predictionPrice, phase, width, height, zoomPips, onNeedHistory, overlays }
+  const pr = useRef({ candles, liveCandle, pair, predictionPrice, phase, width, height, zoomPips, onNeedHistory, overlays, initialTargetTs })
+  pr.current = { candles, liveCandle, pair, predictionPrice, phase, width, height, zoomPips, onNeedHistory, overlays, initialTargetTs }
+
+  // Track whether we've applied the initial target pan (only do it once per mount)
+  const targetApplied = useRef(false)
 
   // History request dedup: only fire once per "near-edge" event
   const histPending    = useRef(false)
@@ -498,6 +502,31 @@ export default function CandlestickChart({
   useEffect(() => {
     if (width > 0) { vp.current.slotW = (width - PL - PR) / 60; redrawRef.current() }
   }, [width])
+
+  // Pan to initialTargetTs once candles are loaded (fires whenever candles changes until applied)
+  useEffect(() => {
+    if (targetApplied.current) return
+    if (!initialTargetTs || candles.length === 0 || width === 0) return
+
+    const slotW  = vp.current.slotW || (width - PL - PR) / 60
+    const chartW = width - PL - PR
+
+    // Find the candle index closest to the target timestamp
+    let best = 0
+    let bestDiff = Infinity
+    for (let i = 0; i < candles.length; i++) {
+      const diff = Math.abs(candles[i].timestamp - initialTargetTs)
+      if (diff < bestDiff) { bestDiff = diff; best = i }
+    }
+
+    // Position the target candle at 35% from the right — leaves room to see what happens after entry
+    const candlesFromRight = candles.length - 1 - best
+    vp.current.pixelOffset = Math.max(0, candlesFromRight * slotW - chartW * 0.35)
+    vp.current.slotW       = Math.max(6, Math.min(14, slotW)) // zoom to a comfortable level for M5 review
+
+    targetApplied.current = true
+    redrawRef.current()
+  }, [candles, width, initialTargetTs])
 
   // ── Event listeners (attached once — read state via refs) ─────────────────
   useEffect(() => {

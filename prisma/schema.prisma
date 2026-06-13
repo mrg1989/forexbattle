@@ -149,6 +149,7 @@ model Signal {
   setup            CrossfireSetup @relation(fields: [setupId], references: [id])
   trade            Trade?
 
+  @@unique([setupId, direction])
   @@map("signals")
 }
 

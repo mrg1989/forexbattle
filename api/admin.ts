@@ -7,6 +7,9 @@
  * GET  /api/admin?action=setup-counts[&symbol=EUR_USD]
  * GET  /api/admin?action=backtest-results[&symbol=EUR_USD]
  * GET  /api/admin?action=trade-analysis-results[&symbol=EUR_USD]
+ * GET  /api/admin?action=backtest-detail ?backtestRunId=xxx
+ * GET  /api/admin?action=trade-list     ?backtestRunId=xxx
+ * GET  /api/admin?action=setup-list     ?backtestRunId=xxx
  * GET  /api/admin?action=data-coverage  ?from=YYYY-MM-DD&to=YYYY-MM-DD[&symbol=EUR_USD][&timeframes=M5,M15,H1,H4,D1]
  * GET  /api/admin?action=import-plan    ?from=YYYY-MM-DD&to=YYYY-MM-DD[&symbol=EUR_USD][&timeframes=M5,M15]
  * POST /api/admin?action=ingest             { symbol, timeframe, from, to }
@@ -75,13 +78,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'run-ai-review':          return await handleRunAiReview(req, res)
       case 'ai-review-results':      return await handleAiReviewResults(req, res)
       case 'recommendation-results': return await handleRecommendationResults(req, res)
+      case 'backtest-detail':        return await handleBacktestDetail(req, res)
+      case 'trade-list':             return await handleTradeList(req, res)
+      case 'setup-list':             return await handleSetupList(req, res)
       case 'data-coverage':          return await handleDataCoverage(req, res)
       case 'import-plan':            return await handleImportPlan(req, res)
       case 'run-pipeline':           return await handleRunPipeline(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, generate-ai-prompt, save-ai-review, run-ai-review, ai-review-results, recommendation-results, data-coverage, import-plan, run-pipeline`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, generate-ai-prompt, save-ai-review, run-ai-review, ai-review-results, recommendation-results, backtest-detail, trade-list, setup-list, data-coverage, import-plan, run-pipeline`,
         })
     }
   } catch (err) {
@@ -1475,4 +1481,151 @@ async function pipelineRunFtmo(backtestRunId: string, strategyVersionId: string,
     if (sim.passed) passCount++
   }
   return { tested: scenarios.length, passCount }
+}
+
+// ── GET backtest-detail ────────────────────────────────────────────────────
+// Full backtest run record, strategy version info, and overall analytics stats
+// in one request — used by the Overview tab in the Research Dashboard.
+
+async function handleBacktestDetail(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const run = await db.backtestRun.findUnique({
+    where:   { id: backtestRunId },
+    include: { strategyVersion: { include: { strategy: true } } },
+  })
+  if (!run) return res.status(404).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const [openCount, overallSummary] = await Promise.all([
+    db.trade.count({ where: { backtestRunId, result: 'open' } }),
+    db.analyticsSummary.findUnique({
+      where: { backtestRunId_summaryType: { backtestRunId, summaryType: 'overall' } },
+    }),
+  ])
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      id:               run.id,
+      symbol:           run.symbol,
+      timeframe:        run.timeframe,
+      fromDate:         run.fromDate,
+      toDate:           run.toDate,
+      status:           run.status,
+      tradeCount:       run.tradeCount,
+      winCount:         run.winCount,
+      lossCount:        run.lossCount,
+      openCount,
+      winRate:          run.winRate,
+      startedAt:        run.startedAt,
+      completedAt:      run.completedAt,
+      strategyName:     run.strategyVersion.strategy.name,
+      versionNumber:    run.strategyVersion.versionNumber,
+      settingsJson:     run.strategyVersion.settingsJson,
+      analytics:        (overallSummary?.summaryJson ?? null) as Record<string, unknown> | null,
+    },
+  })
+}
+
+// ── GET trade-list ─────────────────────────────────────────────────────────
+// All trades for a backtest run with signal metadata and path analysis.
+
+async function handleTradeList(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const trades = await db.trade.findMany({
+    where:   { backtestRunId },
+    orderBy: { entryTs: 'asc' },
+    include: {
+      signal: {
+        include: { setup: { select: { id: true, dateUk: true } } },
+      },
+      pathAnalysis: true,
+    },
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: trades.map(t => ({
+      id:                 t.id,
+      symbol:             t.symbol,
+      direction:          t.direction,
+      entryTs:            t.entryTs,
+      exitTs:             t.exitTs,
+      entryPrice:         t.entryPrice,
+      slPrice:            t.slPrice,
+      tpPrice:            t.tpPrice,
+      exitPrice:          t.exitPrice,
+      result:             t.result,
+      profitLossR:        t.profitLossR,
+      breakoutType:       t.signal?.breakoutType ?? null,
+      dateUk:             t.signal?.setup?.dateUk ?? null,
+      setupId:            t.signal?.setup?.id ?? null,
+      mfeR:               t.pathAnalysis?.mfeR ?? null,
+      maeR:               t.pathAnalysis?.maeR ?? null,
+      reached1r:          t.pathAnalysis?.reached1r ?? false,
+      timeTo1rMinutes:    t.pathAnalysis?.timeTo1rMinutes ?? null,
+      timeToExitMinutes:  t.pathAnalysis?.timeToExitMinutes ?? null,
+      breakEvenWouldHelp: t.pathAnalysis?.breakEvenWouldHelp ?? false,
+    })),
+  })
+}
+
+// ── GET setup-list ─────────────────────────────────────────────────────────
+// All Crossfire setups for a backtest run's symbol + date range.
+// Annotated with whether a signal and trade were produced for each setup.
+
+async function handleSetupList(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: backtestRunId } })
+  if (!run) return res.status(404).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  const fromDateStr = run.fromDate.toISOString().slice(0, 10)
+  const toDateStr   = run.toDate.toISOString().slice(0, 10)
+
+  const setups = await db.crossfireSetup.findMany({
+    where: {
+      strategyVersionId: run.strategyVersionId,
+      symbol:            run.symbol,
+      dateUk:            { gte: fromDateStr, lte: toDateStr },
+    },
+    orderBy: { dateUk: 'asc' },
+    include: {
+      signals: {
+        include: { trade: { select: { id: true, result: true } } },
+      },
+    },
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: setups.map(s => ({
+      id:                  s.id,
+      symbol:              run.symbol,
+      dateUk:              s.dateUk,
+      setupValid:          s.setupValid,
+      invalidReason:       s.invalidReason,
+      setupCandleTs:       s.setupCandleTs,
+      hhPrice:             s.hhPrice,
+      llPrice:             s.llPrice,
+      greenLineSlope:      s.greenLineSlope,
+      greenLineIntercept:  s.greenLineIntercept,
+      redLineSlope:        s.redLineSlope,
+      redLineIntercept:    s.redLineIntercept,
+      signalDetected:      s.signals.length > 0,
+      signalDirection:     s.signals[0]?.direction ?? null,
+      tradeCreated:        s.signals.some(sig => sig.trade != null),
+      tradeResult:         s.signals.find(sig => sig.trade != null)?.trade?.result ?? null,
+    })),
+  })
 }

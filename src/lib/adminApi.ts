@@ -95,6 +95,68 @@ export interface PromptData {
   autoReviewAvailable: boolean
 }
 
+export interface BacktestDetail {
+  id: string
+  symbol: string
+  timeframe: string
+  fromDate: string
+  toDate: string
+  status: string
+  tradeCount: number
+  winCount: number
+  lossCount: number
+  openCount: number
+  winRate: number | null
+  startedAt: string
+  completedAt: string | null
+  strategyName: string
+  versionNumber: number
+  settingsJson: Record<string, unknown>
+  analytics: Record<string, unknown> | null
+}
+
+export interface TradeRow {
+  id: string
+  symbol: string
+  direction: string
+  entryTs: string
+  exitTs: string | null
+  entryPrice: number
+  slPrice: number
+  tpPrice: number
+  exitPrice: number | null
+  result: string
+  profitLossR: number | null
+  breakoutType: string | null
+  dateUk: string | null
+  setupId: string | null
+  mfeR: number | null
+  maeR: number | null
+  reached1r: boolean
+  timeTo1rMinutes: number | null
+  timeToExitMinutes: number | null
+  breakEvenWouldHelp: boolean
+}
+
+export interface SetupRow {
+  id: string
+  symbol: string
+  dateUk: string
+  setupValid: boolean
+  invalidReason: string | null
+  setupCandleTs: string
+  hhPrice: number
+  llPrice: number
+  greenLineSlope: number
+  greenLineIntercept: number
+  redLineSlope: number
+  redLineIntercept: number
+  signalDetected: boolean
+  signalDirection: string | null
+  tradeCreated: boolean
+  tradeResult: string | null
+}
+
 export interface CoverageRow {
   symbol: string
   timeframe: string
@@ -184,6 +246,15 @@ export const adminApi = {
     req<{ reviewId: string; recommendationCount: number; parsedSuccessfully: boolean }>(
       'POST', 'save-ai-review', {}, { backtestRunId, responseText, aiModel },
     ),
+
+  getBacktestDetail: (backtestRunId: string) =>
+    req<BacktestDetail>('GET', 'backtest-detail', { backtestRunId }),
+
+  getTradeList: (backtestRunId: string) =>
+    req<TradeRow[]>('GET', 'trade-list', { backtestRunId }),
+
+  getSetupList: (backtestRunId: string) =>
+    req<SetupRow[]>('GET', 'setup-list', { backtestRunId }),
 
   getDataCoverage: (from: string, to: string, symbol?: string, timeframes?: string) =>
     req<CoverageResult>('GET', 'data-coverage', {

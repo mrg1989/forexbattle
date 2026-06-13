@@ -6,12 +6,15 @@ import {
   Copy, Check, X, Loader2, AlertCircle, Zap,
   ChevronDown, ChevronUp, RefreshCw,
   Database, Play, CheckCircle2, SkipForward, XCircle, Clock,
+  Info, Table2, Crosshair, ExternalLink,
+  ArrowUp, ArrowDown, Filter,
 } from 'lucide-react'
 import { adminApi } from '../lib/adminApi'
 import type {
   BacktestRun, AnalyticsSummary, FtmoResult,
   AiReview, Recommendation, PromptData,
   CoverageRow, ImportPlanResult, PipelineResult, PipelineStep,
+  BacktestDetail, TradeRow, SetupRow,
 } from '../lib/adminApi'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -713,6 +716,524 @@ function RecsPanel({ recommendations, loading }: { recommendations: Recommendati
   )
 }
 
+// ── Overview Panel ─────────────────────────────────────────────────────────
+
+const DATA_PROVENANCE = [
+  { source: 'M15 candles',                  usedFor: 'Setup detection — daily 08:00–13:00 UK window' },
+  { source: 'M5 candles',                   usedFor: 'Signal detection — 13:00–16:00 UK trading session' },
+  { source: 'M5 candles',                   usedFor: 'Trade simulation — entry, SL/TP walk-forward' },
+  { source: 'M5 candles (stored)',           usedFor: 'Trade path analysis — MFE / MAE / R milestones' },
+  { source: 'Trades + path analysis',        usedFor: 'Analytics — win rate, expectancy, day/hour/breakout slices' },
+  { source: 'Analytics summaries only',      usedFor: 'AI reviews — no raw candles sent to Claude' },
+  { source: 'H1 / H4 / D1 candles',         usedFor: 'Planned — trend filter context (not yet active)' },
+]
+
+function OverviewPanel({ detail, loading }: { detail: BacktestDetail | null; loading: boolean }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  if (loading) return <div className="flex justify-center py-16"><Spinner size={6} /></div>
+  if (!detail) return <EmptyState message="Run backtest-detail to load overview." />
+
+  const a = detail.analytics ?? {}
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Run metadata */}
+      <section>
+        <h3 className="text-xs font-semibold text-btl-muted uppercase tracking-wider mb-3">Run Details</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mb-3">
+          <StatCard label="Symbol"    value={detail.symbol.replace('_', '/')} />
+          <StatCard label="Timeframe" value={detail.timeframe} />
+          <StatCard label="From"      value={fmtDate(detail.fromDate)} />
+          <StatCard label="To"        value={fmtDate(detail.toDate)} />
+          <StatCard label="Status"    value={detail.status}
+            color={detail.status === 'completed' ? 'text-btl-up' : detail.status === 'failed' ? 'text-btl-down' : 'text-btl-gold'} />
+          <StatCard label="Strategy"  value={`${detail.strategyName} v${detail.versionNumber}`} />
+          <StatCard label="Trades"    value={String(detail.tradeCount)}
+            sub={`${detail.winCount}W / ${detail.lossCount}L / ${detail.openCount} open`} />
+          <StatCard label="Win Rate"  value={detail.winRate != null ? fmtPct(detail.winRate * 100) : '—'}
+            color={winColor(detail.winRate != null ? detail.winRate * 100 : null)} />
+        </div>
+        <p className="text-xs font-mono text-btl-faint">ID: {detail.id}</p>
+      </section>
+
+      {/* Analytics stats (from overall summary) */}
+      {detail.analytics && (
+        <section>
+          <h3 className="text-xs font-semibold text-btl-muted uppercase tracking-wider mb-3">Performance Stats</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <StatCard label="Expectancy"    value={fmtR(a.expectancy)}
+              color={Number(a.expectancy) >= 0 ? 'text-btl-up' : 'text-btl-down'} />
+            <StatCard label="Profit Factor" value={fmtN(a.profitFactor)}
+              color={Number(a.profitFactor) >= 1.5 ? 'text-btl-up' : 'text-btl-muted'} />
+            <StatCard label="Max Drawdown"  value={fmtR(a.maxDrawdownR)} color="text-btl-down" />
+            <StatCard label="Total R"       value={fmtR(a.totalR)}
+              color={Number(a.totalR) >= 0 ? 'text-btl-up' : 'text-btl-down'} />
+          </div>
+        </section>
+      )}
+
+      {/* Strategy settings snapshot */}
+      <section>
+        <button
+          onClick={() => setSettingsOpen(o => !o)}
+          className="flex items-center gap-2 text-xs font-semibold text-btl-muted uppercase tracking-wider mb-2 hover:text-btl-text transition-colors"
+        >
+          {settingsOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          Strategy Settings Snapshot (v{detail.versionNumber})
+        </button>
+        {settingsOpen && (
+          <pre className="text-xs font-mono text-btl-muted bg-btl-bg/60 border border-btl-border rounded-xl p-4 overflow-x-auto">
+            {JSON.stringify(detail.settingsJson, null, 2)}
+          </pre>
+        )}
+      </section>
+
+      {/* Data provenance */}
+      <section>
+        <h3 className="text-xs font-semibold text-btl-muted uppercase tracking-wider mb-3">Data Provenance</h3>
+        <div className="glass-md rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-btl-muted border-b border-btl-border">
+                <th className="text-left px-4 py-2.5 font-normal">Data source</th>
+                <th className="text-left px-4 py-2.5 font-normal">Used for</th>
+              </tr>
+            </thead>
+            <tbody>
+              {DATA_PROVENANCE.map((row, i) => (
+                <tr key={i} className={clsx('border-t border-btl-border/40', row.source.includes('Planned') && 'opacity-50')}>
+                  <td className="px-4 py-2.5 text-xs font-mono text-btl-text whitespace-nowrap">{row.source}</td>
+                  <td className="px-4 py-2.5 text-xs text-btl-muted">{row.usedFor}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// ── Trade Explorer ─────────────────────────────────────────────────────────
+
+type TradeFilter = 'all' | 'wins' | 'losses' | 'opens' | 'buys' | 'sells'
+type TradeSort   = { col: 'date' | 'r' | 'mfe' | 'mae'; dir: 'asc' | 'desc' }
+
+function dirLabel(d: string) { return d === 'buy' ? '▲ Buy' : '▼ Sell' }
+function dirColor(d: string) { return d === 'buy' ? 'text-btl-up' : 'text-btl-down' }
+function resultColor(r: string) {
+  if (r === 'win')  return 'text-btl-up'
+  if (r === 'loss') return 'text-btl-down'
+  return 'text-btl-muted'
+}
+function exitReason(result: string) {
+  if (result === 'win')  return 'TP hit'
+  if (result === 'loss') return 'SL hit'
+  return 'Session end'
+}
+function fmtMins(m: number | null) {
+  if (m == null) return '—'
+  if (m < 60)    return `${m}m`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+function px(p: number) { return p.toFixed(5) }
+
+interface BalanceStats {
+  current: number
+  peak:    number
+  maxDDPct: number
+  totalR:  number
+  curve:   Map<string, number>   // tradeId → running balance after that trade
+}
+
+function computeBalance(trades: TradeRow[], start: number, riskPct: number): BalanceStats {
+  let balance = start
+  let peak    = start
+  let maxDD   = 0
+  let totalR  = 0
+  const curve = new Map<string, number>()
+  for (const t of trades) {
+    if (t.profitLossR != null) {
+      const pnl = balance * (riskPct / 100) * t.profitLossR
+      balance  += pnl
+      totalR   += t.profitLossR
+      if (balance > peak) peak = balance
+      const dd = peak > 0 ? ((peak - balance) / peak) * 100 : 0
+      if (dd > maxDD) maxDD = dd
+    }
+    curve.set(t.id, balance)
+  }
+  return { current: balance, peak, maxDDPct: maxDD, totalR, curve }
+}
+
+function TradeExplorer({ trades, symbol, loading }: { trades: TradeRow[]; symbol: string; loading: boolean }) {
+  const [filter, setFilter]       = useState<TradeFilter>('all')
+  const [sort, setSort]           = useState<TradeSort>({ col: 'date', dir: 'asc' })
+  const [startBal, setStartBal]   = useState('10000')
+  const [riskPct, setRiskPct]     = useState('1')
+  const [balOpen, setBalOpen]     = useState(false)
+
+  const start   = parseFloat(startBal) || 10000
+  const riskP   = parseFloat(riskPct)  || 1
+  const balance = computeBalance(trades, start, riskP)
+
+  const visible = trades
+    .filter(t => {
+      if (filter === 'wins')   return t.result === 'win'
+      if (filter === 'losses') return t.result === 'loss'
+      if (filter === 'opens')  return t.result === 'open'
+      if (filter === 'buys')   return t.direction === 'buy'
+      if (filter === 'sells')  return t.direction === 'sell'
+      return true
+    })
+    .sort((a, b) => {
+      const mul = sort.dir === 'asc' ? 1 : -1
+      if (sort.col === 'date') return mul * (new Date(a.entryTs).getTime() - new Date(b.entryTs).getTime())
+      if (sort.col === 'r')    return mul * ((a.profitLossR ?? -99) - (b.profitLossR ?? -99))
+      if (sort.col === 'mfe')  return mul * ((a.mfeR ?? 0) - (b.mfeR ?? 0))
+      if (sort.col === 'mae')  return mul * ((a.maeR ?? 0) - (b.maeR ?? 0))
+      return 0
+    })
+
+  function toggleSort(col: TradeSort['col']) {
+    setSort(prev => prev.col === col
+      ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { col, dir: col === 'date' ? 'asc' : 'desc' })
+  }
+
+  function SortIcon({ col }: { col: TradeSort['col'] }) {
+    if (sort.col !== col) return <ArrowUp className="w-3 h-3 text-btl-faint" />
+    return sort.dir === 'asc'
+      ? <ArrowUp className="w-3 h-3 text-btl-purple" />
+      : <ArrowDown className="w-3 h-3 text-btl-purple" />
+  }
+
+  if (loading) return <div className="flex justify-center py-16"><Spinner size={6} /></div>
+  if (!trades.length) return <EmptyState message="No trades for this run. Run action=run-backtest first." />
+
+  const FILTERS: { id: TradeFilter; label: string }[] = [
+    { id: 'all',    label: `All (${trades.length})` },
+    { id: 'wins',   label: `Wins (${trades.filter(t => t.result === 'win').length})` },
+    { id: 'losses', label: `Losses (${trades.filter(t => t.result === 'loss').length})` },
+    { id: 'opens',  label: `Open (${trades.filter(t => t.result === 'open').length})` },
+    { id: 'buys',   label: `Buy (${trades.filter(t => t.direction === 'buy').length})` },
+    { id: 'sells',  label: `Sell (${trades.filter(t => t.direction === 'sell').length})` },
+  ]
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Balance calculator */}
+      <div className="glass-md rounded-xl overflow-hidden">
+        <button
+          onClick={() => setBalOpen(o => !o)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-btl-text hover:bg-white/[0.02] transition-colors"
+        >
+          <span className="flex items-center gap-2">
+            {balOpen ? <ChevronUp className="w-4 h-4 text-btl-muted" /> : <ChevronDown className="w-4 h-4 text-btl-muted" />}
+            Running Account Balance
+          </span>
+          <span className="text-xs text-btl-muted">{balOpen ? 'collapse' : 'expand'}</span>
+        </button>
+        {balOpen && (
+          <div className="px-4 pb-4 border-t border-btl-border/40">
+            <div className="flex flex-wrap gap-3 mt-3 mb-4">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-btl-muted">Starting balance (£)</label>
+                <input
+                  type="number" min="100" value={startBal}
+                  onChange={e => setStartBal(e.target.value)}
+                  className="bg-btl-surface border border-btl-border rounded-lg px-3 py-1.5 text-sm text-btl-text w-28 focus:outline-none focus:border-btl-purple/50"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-btl-muted">Risk per trade (%)</label>
+                <input
+                  type="number" min="0.1" step="0.1" max="10" value={riskPct}
+                  onChange={e => setRiskPct(e.target.value)}
+                  className="bg-btl-surface border border-btl-border rounded-lg px-3 py-1.5 text-sm text-btl-text w-20 focus:outline-none focus:border-btl-purple/50"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <StatCard label="Current Balance" value={`£${Math.round(balance.current).toLocaleString()}`}
+                color={balance.current >= start ? 'text-btl-up' : 'text-btl-down'} />
+              <StatCard label="Peak Balance"    value={`£${Math.round(balance.peak).toLocaleString()}`} color="text-btl-up" />
+              <StatCard label="Max Drawdown"    value={`${balance.maxDDPct.toFixed(1)}%`} color="text-btl-down" />
+              <StatCard label="Total R"         value={fmtR(balance.totalR)}
+                color={balance.totalR >= 0 ? 'text-btl-up' : 'text-btl-down'} />
+            </div>
+            <p className="mt-3 text-xs text-btl-muted">
+              Compound model — {riskP}% of current balance risked per trade. Open trades counted at R=0.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Filters */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Filter className="w-3.5 h-3.5 text-btl-faint shrink-0" />
+        {FILTERS.map(f => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            className={clsx(
+              'px-3 py-1 rounded-lg text-xs font-medium transition-colors',
+              filter === f.id
+                ? 'bg-btl-purple/20 text-btl-text border border-btl-purple/40'
+                : 'glass-md text-btl-muted hover:text-btl-text',
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Trade table */}
+      <div className="overflow-x-auto rounded-xl border border-btl-border">
+        <table className="w-full text-xs whitespace-nowrap">
+          <thead>
+            <tr className="bg-btl-surface text-btl-muted border-b border-btl-border">
+              <th className="px-3 py-2.5 text-left font-normal">#</th>
+              <th className="px-3 py-2.5 text-left font-normal">
+                <button className="flex items-center gap-1" onClick={() => toggleSort('date')}>Date<SortIcon col="date" /></button>
+              </th>
+              <th className="px-3 py-2.5 text-left font-normal">Dir</th>
+              <th className="px-3 py-2.5 text-right font-normal">Entry</th>
+              <th className="px-3 py-2.5 text-right font-normal">SL</th>
+              <th className="px-3 py-2.5 text-right font-normal">TP</th>
+              <th className="px-3 py-2.5 text-right font-normal">Exit</th>
+              <th className="px-3 py-2.5 text-center font-normal">Result</th>
+              <th className="px-3 py-2.5 text-right font-normal">
+                <button className="flex items-center gap-1 ml-auto" onClick={() => toggleSort('r')}>R<SortIcon col="r" /></button>
+              </th>
+              <th className="px-3 py-2.5 text-right font-normal">
+                <button className="flex items-center gap-1 ml-auto" onClick={() => toggleSort('mfe')}>MFE R<SortIcon col="mfe" /></button>
+              </th>
+              <th className="px-3 py-2.5 text-right font-normal">
+                <button className="flex items-center gap-1 ml-auto" onClick={() => toggleSort('mae')}>MAE R<SortIcon col="mae" /></button>
+              </th>
+              <th className="px-3 py-2.5 text-right font-normal">→1R</th>
+              <th className="px-3 py-2.5 text-right font-normal">Duration</th>
+              <th className="px-3 py-2.5 text-center font-normal">Exit reason</th>
+              <th className="px-3 py-2.5 text-center font-normal">BE?</th>
+              <th className="px-3 py-2.5 text-right font-normal">Balance</th>
+              <th className="px-3 py-2.5 text-center font-normal">Chart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((t, i) => {
+              const durationMin = t.exitTs
+                ? Math.round((new Date(t.exitTs).getTime() - new Date(t.entryTs).getTime()) / 60_000)
+                : t.timeToExitMinutes
+              const bal = balance.curve.get(t.id)
+              return (
+                <tr key={t.id} className="border-t border-btl-border/40 hover:bg-white/[0.015] transition-colors">
+                  <td className="px-3 py-2 text-btl-faint tabular">{i + 1}</td>
+                  <td className="px-3 py-2 text-btl-muted tabular">
+                    {t.dateUk ?? new Date(t.entryTs).toISOString().slice(0, 10)}{' '}
+                    <span className="text-btl-faint">{new Date(t.entryTs).toISOString().slice(11, 16)}</span>
+                  </td>
+                  <td className={clsx('px-3 py-2 font-medium', dirColor(t.direction))}>{dirLabel(t.direction)}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-text">{px(t.entryPrice)}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-down">{px(t.slPrice)}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-up">{px(t.tpPrice)}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-muted">{t.exitPrice != null ? px(t.exitPrice) : '—'}</td>
+                  <td className={clsx('px-3 py-2 text-center font-semibold', resultColor(t.result))}>{t.result}</td>
+                  <td className={clsx('px-3 py-2 text-right tabular font-medium', t.profitLossR != null && t.profitLossR >= 0 ? 'text-btl-up' : 'text-btl-down')}>
+                    {t.profitLossR != null ? fmtR(t.profitLossR) : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular text-btl-up">{t.mfeR != null ? `${t.mfeR.toFixed(2)}R` : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-down">{t.maeR != null ? `${t.maeR.toFixed(2)}R` : '—'}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-muted">{fmtMins(t.timeTo1rMinutes)}</td>
+                  <td className="px-3 py-2 text-right tabular text-btl-muted">{fmtMins(durationMin ?? null)}</td>
+                  <td className="px-3 py-2 text-center text-btl-muted">{exitReason(t.result)}</td>
+                  <td className="px-3 py-2 text-center">
+                    {t.breakEvenWouldHelp
+                      ? <span className="text-btl-gold font-medium">Yes</span>
+                      : <span className="text-btl-faint">No</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular text-btl-muted">
+                    {bal != null ? `£${Math.round(bal).toLocaleString()}` : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    {t.dateUk && (
+                      <Link
+                        to={`/?symbol=${symbol}&date=${t.dateUk}&tradeId=${t.id}`}
+                        className="inline-flex items-center gap-0.5 text-btl-purple hover:text-purple-400 transition-colors"
+                        title="Open on chart"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        {visible.length === 0 && (
+          <div className="py-8 text-center text-btl-muted text-xs">No trades match the current filter.</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Setup Explorer ─────────────────────────────────────────────────────────
+
+type SetupFilter = 'all' | 'valid' | 'invalid'
+
+function SetupExplorer({ setups, loading }: { setups: SetupRow[]; loading: boolean }) {
+  const [filter, setFilter] = useState<SetupFilter>('all')
+
+  if (loading) return <div className="flex justify-center py-16"><Spinner size={6} /></div>
+  if (!setups.length) return <EmptyState message="No setups found. Run action=run-setup-detection first." />
+
+  const visible = setups.filter(s => {
+    if (filter === 'valid')   return s.setupValid
+    if (filter === 'invalid') return !s.setupValid
+    return true
+  })
+
+  const validCount   = setups.filter(s => s.setupValid).length
+  const signalCount  = setups.filter(s => s.signalDetected).length
+  const tradeCount   = setups.filter(s => s.tradeCreated).length
+
+  const FILTERS: { id: SetupFilter; label: string }[] = [
+    { id: 'all',     label: `All (${setups.length})` },
+    { id: 'valid',   label: `Valid (${validCount})` },
+    { id: 'invalid', label: `Invalid (${setups.length - validCount})` },
+  ]
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Summary chips */}
+      <div className="flex flex-wrap gap-3">
+        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
+          <span className="text-btl-muted">Total setups: </span>
+          <span className="text-btl-text font-medium">{setups.length}</span>
+        </div>
+        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
+          <span className="text-btl-muted">Valid: </span>
+          <span className="text-btl-up font-medium">{validCount}</span>
+          <span className="text-btl-muted"> · Invalid: </span>
+          <span className="text-btl-down font-medium">{setups.length - validCount}</span>
+        </div>
+        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
+          <span className="text-btl-muted">Signal detected: </span>
+          <span className="text-btl-text font-medium">{signalCount}</span>
+        </div>
+        <div className="glass-md rounded-lg px-3 py-1.5 text-xs">
+          <span className="text-btl-muted">Trade created: </span>
+          <span className="text-btl-text font-medium">{tradeCount}</span>
+        </div>
+      </div>
+
+      {/* Filter chips */}
+      <div className="flex items-center gap-2">
+        <Filter className="w-3.5 h-3.5 text-btl-faint shrink-0" />
+        {FILTERS.map(f => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            className={clsx(
+              'px-3 py-1 rounded-lg text-xs font-medium transition-colors',
+              filter === f.id
+                ? 'bg-btl-purple/20 text-btl-text border border-btl-purple/40'
+                : 'glass-md text-btl-muted hover:text-btl-text',
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Setup table */}
+      <div className="overflow-x-auto rounded-xl border border-btl-border">
+        <table className="w-full text-xs whitespace-nowrap">
+          <thead>
+            <tr className="bg-btl-surface text-btl-muted border-b border-btl-border">
+              <th className="px-3 py-2.5 text-left font-normal">Date</th>
+              <th className="px-3 py-2.5 text-center font-normal">Valid</th>
+              <th className="px-3 py-2.5 text-left font-normal">Reason</th>
+              <th className="px-3 py-2.5 text-right font-normal">Prev High</th>
+              <th className="px-3 py-2.5 text-right font-normal">Prev Low</th>
+              <th className="px-3 py-2.5 text-left font-normal">Setup candle</th>
+              <th className="px-3 py-2.5 text-left font-normal">Green line</th>
+              <th className="px-3 py-2.5 text-left font-normal">Red line</th>
+              <th className="px-3 py-2.5 text-center font-normal">Signal</th>
+              <th className="px-3 py-2.5 text-center font-normal">Dir</th>
+              <th className="px-3 py-2.5 text-center font-normal">Trade</th>
+              <th className="px-3 py-2.5 text-center font-normal">Result</th>
+              <th className="px-3 py-2.5 text-center font-normal">Chart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map(s => (
+              <tr key={s.id} className="border-t border-btl-border/40 hover:bg-white/[0.015] transition-colors">
+                <td className="px-3 py-2 text-btl-text font-mono">{s.dateUk}</td>
+                <td className="px-3 py-2 text-center">
+                  {s.setupValid
+                    ? <CheckCircle2 className="w-3.5 h-3.5 text-btl-up inline" />
+                    : <XCircle className="w-3.5 h-3.5 text-btl-down inline" />}
+                </td>
+                <td className="px-3 py-2 text-btl-muted max-w-[160px] truncate" title={s.invalidReason ?? ''}>
+                  {s.invalidReason ?? '—'}
+                </td>
+                <td className="px-3 py-2 text-right tabular text-btl-up">{s.hhPrice.toFixed(5)}</td>
+                <td className="px-3 py-2 text-right tabular text-btl-down">{s.llPrice.toFixed(5)}</td>
+                <td className="px-3 py-2 text-btl-muted tabular">
+                  {new Date(s.setupCandleTs).toISOString().slice(11, 16)} UTC
+                </td>
+                <td className="px-3 py-2 text-btl-faint tabular" title="slope · intercept">
+                  {s.greenLineSlope.toExponential(3)}
+                </td>
+                <td className="px-3 py-2 text-btl-faint tabular" title="slope · intercept">
+                  {s.redLineSlope.toExponential(3)}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {s.signalDetected
+                    ? <span className="text-btl-up font-medium">Yes</span>
+                    : <span className="text-btl-faint">No</span>}
+                </td>
+                <td className={clsx('px-3 py-2 text-center font-medium', s.signalDirection ? dirColor(s.signalDirection) : 'text-btl-faint')}>
+                  {s.signalDirection ?? '—'}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {s.tradeCreated
+                    ? <span className="text-btl-up font-medium">Yes</span>
+                    : <span className="text-btl-faint">No</span>}
+                </td>
+                <td className={clsx('px-3 py-2 text-center font-medium', s.tradeResult ? resultColor(s.tradeResult) : 'text-btl-faint')}>
+                  {s.tradeResult ?? '—'}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  <Link
+                    to={`/?symbol=${s.symbol}&date=${s.dateUk}&setupId=${s.id}`}
+                    className="inline-flex items-center gap-0.5 text-btl-purple hover:text-purple-400 transition-colors"
+                    title="Open on chart"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {visible.length === 0 && (
+          <div className="py-8 text-center text-btl-muted text-xs">No setups match the current filter.</div>
+        )}
+      </div>
+
+      <p className="text-xs text-btl-faint">
+        Open On Chart links route to <span className="font-mono">/?symbol=…&date=…&setupId=…</span>.
+        Chart support for these params is a planned follow-up — the chart sandbox will ignore them for now.
+      </p>
+    </div>
+  )
+}
+
 // ── Pipeline Panel ─────────────────────────────────────────────────────────
 
 const SYMBOLS = ['EUR_USD', 'GBP_USD']
@@ -1045,7 +1566,7 @@ function RunItem({ run, selected, onClick }: { run: BacktestRun; selected: boole
 
 // ── Main Dashboard ─────────────────────────────────────────────────────────
 
-type Tab = 'analytics' | 'ftmo' | 'ai' | 'recommendations'
+type Tab = 'overview' | 'trades' | 'setups' | 'analytics' | 'ftmo' | 'ai' | 'recommendations'
 
 export default function ResearchDashboard() {
   const [runs, setRuns] = useState<BacktestRun[]>([])
@@ -1054,12 +1575,15 @@ export default function ResearchDashboard() {
 
   const [showPipeline, setShowPipeline] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<Tab>('analytics')
+  const [activeTab, setActiveTab] = useState<Tab>('overview')
 
   const [summaries, setSummaries]         = useState<AnalyticsSummary[]>([])
   const [ftmoResults, setFtmoResults]     = useState<FtmoResult[]>([])
   const [aiReviews, setAiReviews]         = useState<AiReview[]>([])
   const [recommendations, setRecs]        = useState<Recommendation[]>([])
+  const [backtestDetail, setDetail]       = useState<BacktestDetail | null>(null)
+  const [tradeList, setTradeList]         = useState<TradeRow[]>([])
+  const [setupList, setSetupList]         = useState<SetupRow[]>([])
   const [dataLoading, setDataLoading]     = useState(false)
 
   const secretMissing = !(import.meta.env.VITE_ADMIN_SECRET as string | undefined)
@@ -1080,17 +1604,26 @@ export default function ResearchDashboard() {
     setFtmoResults([])
     setAiReviews([])
     setRecs([])
+    setDetail(null)
+    setTradeList([])
+    setSetupList([])
     try {
-      const [s, f, a, r] = await Promise.allSettled([
+      const [s, f, a, r, d, tl, sl] = await Promise.allSettled([
         adminApi.getAnalytics(id),
         adminApi.getFtmoResults(id),
         adminApi.getAiReviews(id),
         adminApi.getRecommendations(id),
+        adminApi.getBacktestDetail(id),
+        adminApi.getTradeList(id),
+        adminApi.getSetupList(id),
       ])
-      if (s.status === 'fulfilled') setSummaries(s.value)
-      if (f.status === 'fulfilled') setFtmoResults(f.value)
-      if (a.status === 'fulfilled') setAiReviews(a.value)
-      if (r.status === 'fulfilled') setRecs(r.value)
+      if (s.status === 'fulfilled')  setSummaries(s.value)
+      if (f.status === 'fulfilled')  setFtmoResults(f.value)
+      if (a.status === 'fulfilled')  setAiReviews(a.value)
+      if (r.status === 'fulfilled')  setRecs(r.value)
+      if (d.status === 'fulfilled')  setDetail(d.value)
+      if (tl.status === 'fulfilled') setTradeList(tl.value)
+      if (sl.status === 'fulfilled') setSetupList(sl.value)
     } finally {
       setDataLoading(false)
     }
@@ -1099,6 +1632,7 @@ export default function ResearchDashboard() {
   const selectRun = (id: string) => {
     setShowPipeline(false)
     setSelectedId(id)
+    setActiveTab('overview')
     loadRunData(id)
   }
 
@@ -1110,10 +1644,13 @@ export default function ResearchDashboard() {
   }
 
   const TABS: { id: Tab; label: string; icon: ComponentType<{ className?: string }> }[] = [
+    { id: 'overview',        label: 'Overview',        icon: Info },
+    { id: 'trades',          label: 'Trades',          icon: Table2 },
+    { id: 'setups',          label: 'Setups',          icon: Crosshair },
     { id: 'analytics',       label: 'Analytics',       icon: BarChart3 },
     { id: 'ftmo',            label: 'FTMO',            icon: TrendingUp },
     { id: 'ai',              label: 'AI Review',       icon: Bot },
-    { id: 'recommendations', label: 'Recommendations', icon: List },
+    { id: 'recommendations', label: 'Recs',            icon: List },
   ]
 
   const selectedRun = runs.find(r => r.id === selectedId)
@@ -1231,6 +1768,19 @@ export default function ResearchDashboard() {
 
               {/* Tab content */}
               <div className="flex-1 overflow-y-auto p-6">
+                {activeTab === 'overview' && (
+                  <OverviewPanel detail={backtestDetail} loading={dataLoading} />
+                )}
+                {activeTab === 'trades' && (
+                  <TradeExplorer
+                    trades={tradeList}
+                    symbol={backtestDetail?.symbol ?? selectedRun?.symbol ?? ''}
+                    loading={dataLoading}
+                  />
+                )}
+                {activeTab === 'setups' && (
+                  <SetupExplorer setups={setupList} loading={dataLoading} />
+                )}
                 {activeTab === 'analytics' && (
                   <AnalyticsPanel summaries={summaries} loading={dataLoading} />
                 )}

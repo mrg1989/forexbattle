@@ -52,7 +52,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!sv) {
     return res.status(400).json({ success: false, error: `strategyVersionId ${svId} not found` })
   }
-  const settings = sv.settingsJson as CrossfireSettings
+  const settings = sv.settingsJson as unknown as CrossfireSettings
 
   const fromDate = new Date(from + 'T00:00:00Z')
   const toDate   = new Date(to   + 'T23:59:59Z')

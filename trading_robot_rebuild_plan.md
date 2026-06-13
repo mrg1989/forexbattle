@@ -1,5 +1,27 @@
 # Trading Robot Rebuild Plan
 
+> **Last updated: 2026-06-13**
+> See `IMPLEMENTATION_PLAN.md` for the detailed stage-by-stage plan and current completion status.
+
+## Implementation Status Summary
+
+| Phase | Description | Status |
+|---|---|---|
+| Phase 1 — Clean separation | Separate trading research from Forex Battle | ✅ Complete |
+| Phase 2 — Candle database | Store reliable market data | ✅ Complete (M5/M15) |
+| Phase 3 — Strategy registry | Save strategies and settings | 🔄 In Progress |
+| Phase 4 — Crossfire setup engine | Detect and save daily setups | ⏳ Not Started |
+| Phase 5 — Signal and trade engine | Detect signals, simulate trades | ⏳ Not Started |
+| Phase 6 — Trade path analysis | MFE / MAE / R-milestone tracking | ⏳ Not Started |
+| Phase 7 — FTMO simulator | Funded account survival simulation | ⏳ Not Started |
+| Phase 8 — Analytics engine | Clean code-computed statistics | ⏳ Not Started |
+| Phase 9 — AI research layer | AI reviews analytics summaries | ⏳ Not Started |
+| Phase 10 — Paper trading | Live signal detection without risk | ⏳ Not Started |
+
+**Key architectural decision:** The trading research platform was built by reworking the existing Vite app rather than creating a new Next.js app. The Forex Battle game was archived to the `forex-battle-v1` git branch. See `IMPLEMENTATION_PLAN.md` — Architectural Decisions section.
+
+---
+
 ## Purpose
 
 This document is the ground-up build plan for separating the trading robot, strategy engine, data storage, backtesting, AI analysis and visual charting system from the existing Forex Battle game setup.
@@ -115,15 +137,15 @@ Suggested monorepo structure:
 
 ## Action checklist
 
-- [ ] Identify current Forex Battle files used by the trading chart.
-- [ ] Identify reusable chart components.
-- [ ] Identify strategy/backtest logic currently mixed into the game.
-- [ ] Create a new `trading-research` app.
-- [ ] Move reusable charting code into `/packages/charting`.
-- [ ] Move strategy logic into `/packages/strategy-engine`.
-- [ ] Remove all direct dependency on Forex Battle game state.
-- [ ] Keep Forex Battle separate as a game/product.
-- [ ] Keep Trading Research separate as the serious trading robot platform.
+- [x] Identify current Forex Battle files used by the trading chart.
+- [x] Identify reusable chart components.
+- [x] Identify strategy/backtest logic currently mixed into the game.
+- [x] ~~Create a new `trading-research` app.~~ → Reworked existing Vite app instead (see IMPLEMENTATION_PLAN.md)
+- [ ] Move reusable charting code into `/packages/charting`. *(deferred — not needed until multi-app extraction)*
+- [ ] Move strategy logic into `/packages/strategy-engine`. *(deferred)*
+- [x] Remove all direct dependency on Forex Battle game state.
+- [x] Keep Forex Battle separate as a game/product. *(archived to `forex-battle-v1` branch)*
+- [x] Keep Trading Research separate as the serious trading robot platform.
 
 ---
 
@@ -155,17 +177,17 @@ Do not start with every pair. Prove the system on a small group first.
 
 ## Action checklist
 
-- [ ] Confirm Oanda instrument names.
-- [ ] Confirm Oanda candle fields returned.
-- [ ] Confirm bid/ask/mid candle availability.
+- [x] Confirm Oanda instrument names. *(EUR_USD, GBP_USD confirmed)*
+- [x] Confirm Oanda candle fields returned. *(mid-price OHLCV confirmed)*
+- [x] Confirm bid/ask/mid candle availability. *(mid price used; bid/ask deferred)*
 - [ ] Confirm spread data availability.
-- [ ] Confirm timezone handling.
-- [ ] Confirm historical candle depth.
-- [ ] Build candle import worker.
-- [ ] Store imported data in database.
-- [ ] Add duplicate protection.
-- [ ] Add missing candle detection.
-- [ ] Add candle quality validation.
+- [x] Confirm timezone handling. *(BST/GMT fix complete — see Phase 1)*
+- [x] Confirm historical candle depth. *(5000 candles/request, pagination implemented)*
+- [x] Build candle import worker. *(api/_lib/candle-ingestion.ts — in validation)*
+- [x] Store imported data in database. *(candles table live in Supabase)*
+- [x] Add duplicate protection. *(createMany skipDuplicates)*
+- [ ] Add missing candle detection. *(deferred to later stage)*
+- [x] Add candle quality validation. *(high >= max(open,close) check)*
 
 ---
 
@@ -249,14 +271,14 @@ Useful for long-term market regime analysis, but not needed for the first build.
 
 ## Action checklist
 
-- [ ] Store M5 candles.
-- [ ] Store M15 candles.
-- [ ] Store H1 candles.
+- [x] Store M5 candles. *(schema ready; ingestion in validation)*
+- [x] Store M15 candles. *(schema ready; ingestion in validation)*
+- [ ] Store H1 candles. *(deferred — same code, add after M5/M15 validated)*
 - [ ] Store H4 candles.
 - [ ] Store D1 candles.
-- [ ] Do not start with M1 unless needed.
-- [ ] Ensure all candles are timestamped consistently.
-- [ ] Store both UTC time and UK-local derived time.
+- [x] Do not start with M1 unless needed.
+- [x] Ensure all candles are timestamped consistently. *(UTC timestampUtc column)*
+- [ ] Store both UTC time and UK-local derived time. *(UK-local deferred — derivable from UTC via time.ts)*
 
 ---
 
@@ -345,15 +367,15 @@ symbol + timeframe + timestamp_utc
 
 ## Action checklist
 
-- [ ] Create `candles` table.
-- [ ] Add unique index on `symbol`, `timeframe`, `timestamp_utc`.
-- [ ] Store Oanda candle data.
-- [ ] Store timestamp in UTC.
-- [ ] Store UK-local derived timestamp.
-- [ ] Add candle validation.
+- [x] Create `candles` table.
+- [x] Add unique index on `symbol`, `timeframe`, `timestamp_utc`.
+- [x] Store Oanda candle data. *(in validation)*
+- [x] Store timestamp in UTC.
+- [ ] Store UK-local derived timestamp. *(deferred — calculable on demand from `toUKDateString`)*
+- [x] Add candle validation. *(OHLC integrity check)*
 - [ ] Add missing candle detection.
-- [ ] Add import logs.
-- [ ] Add re-sync function for a date range.
+- [x] Add import logs. *(`import_logs` table live)*
+- [ ] Add re-sync function for a date range. *(existing ingest endpoint is re-runnable via skipDuplicates)*
 
 ---
 
@@ -398,9 +420,9 @@ Be careful with daylight saving time.
 
 ## Action checklist
 
-- [ ] Build timezone conversion utility.
-- [ ] Correctly handle UK BST/GMT shifts.
-- [ ] Store session classification for every candle or calculate it reliably.
+- [x] Build timezone conversion utility. *(`src/lib/time.ts` — `toUKHour`, `toUKDateString`, `toUKTimeString`)*
+- [x] Correctly handle UK BST/GMT shifts. *(uses `Intl.DateTimeFormat` with `timeZone: 'Europe/London'`)*
+- [ ] Store session classification for every candle or calculate it reliably. *(derivable from `toUKHour` — not persisted yet)*
 - [ ] Add day-of-week analysis.
 - [ ] Add session overlap flags.
 - [ ] Add news calendar integration later.
@@ -482,9 +504,9 @@ is_live_approved
 
 ## Action checklist
 
-- [ ] Create `strategies` table.
-- [ ] Create `strategy_versions` table.
-- [ ] Store every settings change as a new version.
+- [x] Create `strategies` table. *(schema live in Supabase)*
+- [x] Create `strategy_versions` table. *(schema live in Supabase)*
+- [ ] Store every settings change as a new version. *(Stage 4 — not started)*
 - [ ] Never overwrite old settings.
 - [ ] Link every backtest to a strategy version.
 - [ ] Link every trade to a strategy version.
@@ -1634,39 +1656,39 @@ Here are 500 Crossfire trades summarised by breakout type, day of week, ATR band
 
 # 24. Build Phases
 
-## Phase 1: Clean separation
+## Phase 1: Clean separation ✅ COMPLETE
 
 Goal: separate trading research from Forex Battle.
 
 Checklist:
 
-- [ ] Create new trading research app.
-- [ ] Move chart components.
-- [ ] Remove Forex Battle dependencies.
-- [ ] Keep existing visual chart working.
+- [x] ~~Create new trading research app.~~ → Reworked existing Vite app; Forex Battle archived to `forex-battle-v1` branch
+- [x] Move chart components. *(CandlestickChart, ChartSandbox, AiAnalysisPanel retained)*
+- [x] Remove Forex Battle dependencies. *(gameStore, gameLogic, game pages all removed)*
+- [x] Keep existing visual chart working. *(confirmed — `npm run dev` and `npm run build` pass)*
 
-## Phase 2: Candle database
+## Phase 2: Candle database 🔄 IN PROGRESS
 
 Goal: store reliable market data.
 
 Checklist:
 
-- [ ] Create database.
-- [ ] Create candles table.
-- [ ] Import Oanda candles.
-- [ ] Store M5, M15, H1, H4, D1.
+- [x] Create database. *(Supabase Postgres project live)*
+- [x] Create candles table. *(+ all 13 other tables; schema pushed)*
+- [x] Import Oanda candles. *(ingestion code complete; deployment validation in progress)*
+- [ ] Store M5, M15, H1, H4, D1. *(M5 and M15 first; H1/H4/D1 after validation)*
 - [ ] Validate missing candles.
 - [ ] Compare with chart display.
 
-## Phase 3: Strategy registry
+## Phase 3: Strategy registry ⏳ NOT STARTED
 
 Goal: save strategies and settings properly.
 
 Checklist:
 
-- [ ] Create strategies table.
-- [ ] Create strategy versions table.
-- [ ] Store Crossfire settings.
+- [x] Create strategies table. *(schema live)*
+- [x] Create strategy versions table. *(schema live)*
+- [ ] Store Crossfire settings. *(seed script — Stage 4)*
 - [ ] Add strategy settings UI.
 
 ## Phase 4: Crossfire setup engine

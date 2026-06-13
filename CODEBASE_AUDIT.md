@@ -1,8 +1,68 @@
 # Codebase Audit — Trading Research Rebuild
 
-Produced: 2026-06-12
+Produced: 2026-06-12  
+Last updated: 2026-06-13  
 Auditor: Claude Code (senior software architect review)
 Source: Full inspection of all project files against `trading_robot_rebuild_plan.md`
+
+> **Note:** This document was produced before implementation began. Sections 3, 4, and 6 describe the state at audit time. See the "Post-Implementation Update" section at the end for the current state of all items.
+
+---
+
+## Post-Implementation Update (2026-06-13)
+
+### Items from Section 4 (Missing) that are now complete
+
+| Item | Status | Notes |
+|---|---|---|
+| Database — all 14 tables | ✅ Live in Supabase | `prisma db push` confirmed all tables |
+| Candle ingestion worker | 🔄 Code complete, deploying | `api/_lib/candle-ingestion.ts` + admin endpoints |
+| Strategy version registry | ✅ Schema only | Tables exist; seed (Stage 4) not yet run |
+| Crossfire setup storage | ✅ Schema only | Table exists; engine (Stage 5) not yet built |
+| Signal storage | ✅ Schema only | Table exists; detection (Stage 6) not yet built |
+| MFE/MAE tracking | ✅ Schema only | Table exists; engine (Stage 7) not yet built |
+| Trade context capture | ✅ Schema only | Table exists |
+| Sliced analytics | ✅ Schema only | Tables exist; engine (Stage 8) not yet built |
+| BST/GMT timezone fix | ✅ Complete | `src/lib/time.ts`; all strategy code updated |
+
+### Items from Section 3 (Should Be Removed) that are now complete
+
+All Forex Battle game code has been removed from the `main` branch:
+- `src/store/gameStore.ts` — removed
+- `src/utils/gameLogic.ts` — removed
+- `src/utils/forex.ts` — stripped to `getPairConfig`, `formatPrice`, `formatPriceDiff` only (GBM generator removed)
+- `src/pages/Landing.tsx`, `Lobby.tsx`, `WaitingRoom.tsx`, `Game.tsx`, `Results.tsx` — removed
+- `src/components/game/*` — removed
+- `src/components/tournament/Leaderboard.tsx` — removed
+- `src/hooks/useLiveRate.ts` — removed
+- `src/types/index.ts` — stripped to `Candle` interface only
+- Game types removed
+- `useGameStore` removed from `ChartSandbox.tsx`
+
+The full original codebase is preserved in the `forex-battle-v1` git branch.
+
+### New files added since audit
+
+| File | Purpose |
+|---|---|
+| `src/lib/time.ts` | BST-safe UK timezone utilities (`toUKHour`, `toUKDateString`, `toUKTimeString`) |
+| `prisma/schema.prisma` | All 14 Prisma models; Prisma 7 (no URL in schema) |
+| `prisma.config.ts` | Prisma CLI config; loads `.env.local` via dotenv |
+| `api/_lib/db.ts` | Prisma 7 singleton with `@prisma/adapter-pg` |
+| `api/_lib/oanda-client.ts` | Server-side OANDA REST client (direct, not via browser proxy) |
+| `api/_lib/candle-ingestion.ts` | Candle fetch → validate → upsert → log |
+| `api/admin/ingest.ts` | `POST /api/admin/ingest` — trigger candle import |
+| `api/admin/candle-counts.ts` | `GET /api/admin/candle-counts` — candle counts per symbol/TF |
+| `.env.example` | Documents all required environment variables |
+
+### Architectural deviations from original audit recommendations
+
+| Recommendation | What happened | Reason |
+|---|---|---|
+| Create `trading-research/` Next.js app | Reworked existing Vite app instead | Less overhead; existing API proxies work identically |
+| `src/lib/db.ts` for Prisma client | `api/_lib/db.ts` | Vercel ESM bundling requires co-location with `api/` functions |
+| `datasource db { url = env("DATABASE_URL") }` | URL removed from schema (Prisma 7 breaking change) | Prisma 7 requires driver adapter; URL managed via `prisma.config.ts` and `Pool` |
+| Keep Forex Battle "completely untouched" | Archived to `forex-battle-v1` branch | Simpler than maintaining two parallel apps |
 
 ---
 

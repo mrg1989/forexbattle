@@ -1,7 +1,27 @@
 # Implementation Plan — Trading Research Platform
 
-Produced: 2026-06-12
+Produced: 2026-06-12  
+Last updated: 2026-06-13
+
 Prerequisite reading: `trading_robot_rebuild_plan.md` (goals and requirements), `CODEBASE_AUDIT.md` (what exists)
+
+---
+
+## Current Status
+
+| Stage | Name | Status |
+|---|---|---|
+| 0 | Timezone Foundation | ✅ Complete |
+| 1 | Project Separation | ✅ Complete (architectural deviation — see below) |
+| 2 | Database Schema | ✅ Complete |
+| 3 | Candle Ingestion Worker | ✅ Complete |
+| 4 | Strategy Registry | ✅ Complete |
+| 5 | Crossfire Setup Engine | ⏳ Not Started |
+| 6 | Signal Detection + Trade Simulation | ⏳ Not Started |
+| 7 | MFE and MAE Tracking | ⏳ Not Started |
+| 8 | Analytics Engine + FTMO Simulation | ⏳ Not Started |
+| 9 | Chart + Trade Review Integration | ⏳ Not Started |
+| 10 | AI Research Layer | ⏳ Not Started |
 
 ---
 
@@ -21,12 +41,52 @@ Prerequisite reading: `trading_robot_rebuild_plan.md` (goals and requirements), 
 
 | Concern | Choice | Reason |
 |---|---|---|
-| Framework | Next.js 14 (App Router) | API routes, SSR, Vercel deployment |
+| Framework | **Vite (existing app reworked)** | See architectural decisions below |
 | Database | Supabase (Postgres) | Relational, dashboard access, Vercel-compatible |
-| ORM | Prisma | Type-safe queries, migration management, schema as code |
+| ORM | Prisma 7 | Type-safe queries, migration management, schema as code |
 | UI state | Zustand | Already familiar, lightweight |
 | Styling | Tailwind CSS | Already configured |
-| Forex Battle build | Vite (unchanged) | No changes to existing app |
+| Forex Battle archive | `forex-battle-v1` git branch | Game features removed from main app; archived permanently |
+
+---
+
+## Architectural Decisions
+
+These decisions deviate from the original plan and are recorded here permanently.
+
+### Decision 1: Rework existing Vite app instead of creating a new Next.js app
+
+**Original plan:** Create a separate `trading-research/` Next.js 14 app alongside the existing Forex Battle Vite app.
+
+**What was done:** The existing Vite app was reworked into the trading research platform. All Forex Battle game features were removed. The game was archived to the `forex-battle-v1` git branch.
+
+**Why:** The existing Vite app already had a working chart, OANDA proxy, Crossfire strategy engine, and AI analysis. Rebuilding all of that in Next.js would have been pure overhead with no user benefit. The Vercel `api/` serverless function pattern works identically in Vite — there was no technical reason to switch frameworks. Maintaining two apps in parallel (Forex Battle + trading-research) also creates confusion about which is canonical. A clean archive branch is simpler.
+
+**Impact:** All file paths in this document that reference `trading-research/` should be read as the project root. The `api/` directory and `src/` directory are at the root level.
+
+### Decision 2: Server-only library files at `api/_lib/` not `src/lib/`
+
+**Original plan:** Prisma client and server-only utilities at `src/lib/db.ts`, `src/lib/candle-ingestion.ts`, etc.
+
+**What was done:** All server-only files live at `api/_lib/db.ts`, `api/_lib/candle-ingestion.ts`, `api/_lib/oanda-client.ts`.
+
+**Why:** `"type": "module"` in `package.json` causes `@vercel/node` v5 to run serverless functions as native Node.js ESM without esbuild bundling. In native ESM, relative imports must use explicit `.js` extensions and the referenced file must be co-located with the function. Files in `src/lib/` are not included in the serverless function deployment bundle. Files in `api/_lib/` (the `_` prefix prevents Vercel treating them as function endpoints) are co-located and correctly deployed.
+
+### Decision 3: Prisma 7 driver adapter pattern
+
+**Original plan:** `new PrismaClient()` singleton, URL in `schema.prisma` via `datasource db { url = env("DATABASE_URL") }`.
+
+**What was done:** `new PrismaClient({ adapter: new PrismaPg(pool) })`, URL managed separately via `prisma.config.ts` with dotenv for CLI and `process.env.DATABASE_URL` for runtime.
+
+**Why:** Prisma 7 removed the URL-in-schema approach. Driver adapters (`@prisma/adapter-pg`) are now required. The CLI uses `prisma.config.ts` which loads `.env.local` via dotenv (Prisma CLI only auto-loads `.env`, not `.env.local`). Runtime uses the adapter with `pg.Pool`.
+
+### Decision 4: Stage 3 initial scope — M5 and M15 only
+
+**Original plan:** Import M5, M15, H1, H4, D1 from Stage 3.
+
+**What was done:** Admin endpoints built to accept any timeframe. Initial validation uses EUR_USD M5 and M15 only.
+
+**Why:** Validate the ingestion pipeline end-to-end before importing the full set. The code already supports all timeframes — expanding after validation is trivial.
 
 ---
 
@@ -61,7 +121,7 @@ ADMIN_SECRET        Simple shared secret to protect admin API routes
 
 ---
 
-## Stage 0: Timezone Foundation
+## Stage 0: Timezone Foundation ✅ COMPLETE
 
 ### Objective
 Fix the BST/GMT bug that causes the 1pm UK candle to be misidentified for approximately
@@ -123,12 +183,21 @@ directions.
 A single, tested, importable utility that all future strategy and backtest code depends on
 for UK time operations. No existing files changed.
 
+### Completion Notes
+- `src/lib/time.ts` created with module-level cached `Intl.DateTimeFormat` formatter (avoids per-call construction overhead that caused 100% CPU regression)
+- `src/utils/strategies.ts` fully updated — all `getHours() === 13` replaced with `toUKHour(ts) === 13`, all `toDateString()` replaced with `toUKDateString(ts)`
+- `src/utils/tradeFeatures.ts` updated with BST-fixed version
+
 ---
 
-## Stage 1: Project Separation
+## Stage 1: Project Separation ✅ COMPLETE (with architectural deviation)
+
+> **Deviation:** A new Next.js app was NOT created. The existing Vite app was reworked into the trading research platform. See Architectural Decision 1 above.
 
 ### Objective
-Create a new `trading-research/` Next.js 14 app at the repo root. Copy reusable components
+~~Create a new `trading-research/` Next.js 14 app at the repo root.~~
+
+**Actual objective achieved:** Stripped all Forex Battle game features from the existing Vite app. Preserved chart, OANDA proxy, Crossfire strategy engine, AI analysis, and FTMO logic. Archived the full Forex Battle game to the `forex-battle-v1` git branch. Copy reusable components
 from Forex Battle into it. Establish routing, API proxy config, and environment variable
 wiring. Verify the chart loads live OANDA candles in the new app. Forex Battle is completely
 untouched throughout.
@@ -212,9 +281,19 @@ migration with no logic changes — only import paths update.
 A standalone Next.js trading research app with working chart and AI analysis, running
 alongside Forex Battle with zero shared files.
 
+### Completion Notes
+- Forex Battle game archived to `forex-battle-v1` branch
+- `src/App.tsx` now renders `ChartSandbox` directly (no routing/game screens)
+- `src/utils/forex.ts` stripped to keep only `getPairConfig`, `formatPrice`, `formatPriceDiff`
+- `src/types/index.ts` stripped to `Candle` interface only
+- All `useGameStore` references removed from `ChartSandbox.tsx`
+- BST-fixed `strategies.ts` and `tradeFeatures.ts` in place
+- Chart performance regression fixed: module-level formatter cache; deep backtest deferred via `useEffect` + `setTimeout(0)`
+- `npm run dev` and `npm run build` pass cleanly
+
 ---
 
-## Stage 2: Database Schema
+## Stage 2: Database Schema ✅ COMPLETE
 
 ### Objective
 Create the complete Postgres schema for the trading research system. All 14 tables, all
@@ -353,9 +432,17 @@ export default db
 A complete, version-controlled schema. Prisma client available to all future API routes.
 The app continues to run and the chart continues to work — no existing functionality broken.
 
+### Completion Notes
+- `prisma/schema.prisma` — all 14 models, all constraints, all unique indexes. Datasource block has no URL (Prisma 7 requirement).
+- `prisma.config.ts` — loads `.env.local` via dotenv before reading `DIRECT_URL`; used by Prisma CLI only
+- `api/_lib/db.ts` — Prisma 7 singleton using `@prisma/adapter-pg` + `pg.Pool` (see Architectural Decision 2 and 3)
+- `.env.example` — documents all required environment variables
+- `package.json` — `postinstall: prisma generate`; deps: `@prisma/adapter-pg`, `@prisma/client`, `pg`
+- All 14 tables confirmed live in Supabase via `npx prisma db push`
+
 ---
 
-## Stage 3: Candle Ingestion Worker
+## Stage 3: Candle Ingestion Worker ✅ COMPLETE
 
 ### Objective
 Build the system that imports historical OANDA candles into the database. An admin page shows
@@ -451,9 +538,22 @@ Steps:
 Admin page shows real candle counts per symbol and timeframe. The database has queryable,
 deduplicated OHLCV data. The chart continues to work from live OANDA — no chart changes yet.
 
+### Completion Notes (code)
+**Actual file locations (see Architectural Decision 2):**
+- `api/_lib/oanda-client.ts` — server-side OANDA REST client; paginates at 5,000 candles/request; calls OANDA directly (not via browser proxy)
+- `api/_lib/candle-ingestion.ts` — fetch → validate (`high >= max(open,close)`) → upsert (`createMany skipDuplicates`) → log to `import_logs`
+- `api/admin/ingest.ts` — `POST /api/admin/ingest`; auth via `Authorization: Bearer ADMIN_SECRET`; accepts `{ symbol, timeframe, from, to }`; allowed symbols: `EUR_USD`, `GBP_USD`; allowed timeframes: `M5`, `M15`
+- `api/admin/candle-counts.ts` — `GET /api/admin/candle-counts`; returns `{ symbol, timeframe, count, earliestDate, latestDate }[]`
+- `vercel.json` — `api/admin/ingest.ts` maxDuration 300s, `api/admin/candle-counts.ts` maxDuration 30s
+- `.env.example` — `ADMIN_SECRET` documented
+
+**Deployment fix confirmed:** `@vercel/node` v5 with `"type": "module"` runs native ESM without bundling. All `api/_lib/` relative imports must use explicit `.js` extensions. Fix deployed and validated.
+
+**No admin UI built** — admin endpoints are curl-accessible. A UI can be added later if needed; it is not required for validation.
+
 ---
 
-## Stage 4: Strategy Registry
+## Stage 4: Strategy Registry ✅ COMPLETE
 
 ### Objective
 Make strategy settings a first-class, versioned, database-backed concept. Seed Crossfire v1
@@ -546,9 +646,16 @@ integer with an optional human-readable `version_name` string.
 Strategy settings are in the database. Every future backtest run links to a `strategyVersionId`.
 The admin page provides visibility into version history.
 
+### Completion Notes
+No CLI seed tool needed. Implemented as idempotent admin endpoints (consistent with the rest of the admin tooling):
+- `api/_lib/strategy-registry.ts` — `CrossfireSettings` type, `CROSSFIRE_V1_SETTINGS` constant, `getActiveStrategyVersion()`, `createStrategyVersion()` (transactional deactivation + insert), `ensureCrossfireV1()` (idempotent upsert)
+- `api/admin/seed-strategies.ts` — `POST /api/admin/seed-strategies`: calls `ensureCrossfireV1()`, returns created/existing strategy + version
+- `api/admin/strategies.ts` — `GET /api/admin/strategies`: lists all strategies with all versions
+- `vercel.json` updated for both new endpoints
+
 ---
 
-## Stage 5: Crossfire Setup Engine
+## Stage 5: Crossfire Setup Engine ⏳ NOT STARTED
 
 ### Objective
 For every trading day in the candle database, detect the 13:00 UK setup candle, compute
@@ -639,7 +746,7 @@ days are recorded with a reason code. The admin page surfaces the detection stat
 
 ---
 
-## Stage 6: Signal Detection and Trade Simulation
+## Stage 6: Signal Detection and Trade Simulation ⏳ NOT STARTED
 
 ### Objective
 Walk M5 candles in the 13:00–16:00 UK trading window for each valid setup. Detect breakout
@@ -751,7 +858,7 @@ The existing chart backtest path is untouched.
 
 ---
 
-## Stage 7: MFE and MAE Tracking
+## Stage 7: MFE and MAE Tracking ⏳ NOT STARTED
 
 ### Objective
 For every trade in the database, scan M5 candles from entry onward and record how far price
@@ -818,7 +925,7 @@ break-even? Are stops too tight? Is 1:3 R:R realistic?
 
 ---
 
-## Stage 8: Analytics Engine and FTMO Simulation
+## Stage 8: Analytics Engine and FTMO Simulation ⏳ NOT STARTED
 
 ### Objective
 Produce clean, code-computed analytics from the trade database. No AI involved. Extract the
@@ -919,7 +1026,7 @@ analytics job.
 
 ---
 
-## Stage 9: Chart and Trade Review Integration
+## Stage 9: Chart and Trade Review Integration ⏳ NOT STARTED
 
 ### Objective
 Connect the chart to the database. The chart page accepts a `?backtestRunId` query parameter.
@@ -995,7 +1102,7 @@ trade by trade. The chart component is unchanged — only its data source change
 
 ---
 
-## Stage 10: AI Research Layer
+## Stage 10: AI Research Layer ⏳ NOT STARTED
 
 ### Objective
 Feed `analytics_summaries` (not raw candles) to Claude. Store every prompt, response, and

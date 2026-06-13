@@ -235,6 +235,20 @@ curl -X POST "$BASE?action=run-ftmo-evaluation" \
 # Retrieve FTMO results:
 curl "$BASE?action=ftmo-results&symbol=EUR_USD" \
   -H "Authorization: Bearer $ADMIN_SECRET"
+
+# Run AI review (requires run-analytics first; uses claude-haiku; replace ID):
+curl -X POST "$BASE?action=run-ai-review" \
+  -H "Authorization: Bearer $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"backtestRunId":"<id-from-run-backtest-response>"}'
+
+# Retrieve AI reviews for a run:
+curl "$BASE?action=ai-review-results&backtestRunId=<id>" \
+  -H "Authorization: Bearer $ADMIN_SECRET"
+
+# Retrieve recommendations (all suggested):
+curl "$BASE?action=recommendation-results&backtestRunId=<id>&status=suggested" \
+  -H "Authorization: Bearer $ADMIN_SECRET"
 CMDS
 
 echo ""

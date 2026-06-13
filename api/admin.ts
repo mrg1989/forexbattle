@@ -12,6 +12,9 @@
  * POST /api/admin?action=run-setup-detection { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-backtest        { symbol, from, to, strategyVersionId? }
  * POST /api/admin?action=run-trade-analysis  { backtestRunId } OR { symbol, from, to }
+ * POST /api/admin?action=run-ai-review        { backtestRunId }
+ * GET  /api/admin?action=ai-review-results    ?backtestRunId=xxx
+ * GET  /api/admin?action=recommendation-results ?backtestRunId=xxx [&status=suggested]
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
@@ -28,6 +31,8 @@ import { computeAllSummaries } from './_lib/analytics.js'
 import type { TradeRecord } from './_lib/analytics.js'
 import { simulateFtmo } from './_lib/ftmo.js'
 import type { FtmoConfig } from './_lib/ftmo.js'
+import { buildPrompt, parseRecommendations } from './_lib/ai-research.js'
+import type { FtmoInput } from './_lib/ai-research.js'
 import { toUKHour, toUKDateString } from './_lib/time.js'
 
 const ALLOWED_SYMBOLS    = ['EUR_USD', 'GBP_USD']
@@ -59,10 +64,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       case 'analytics-results':      return await handleAnalyticsResults(req, res)
       case 'run-ftmo-evaluation':    return await handleRunFtmoEvaluation(req, res)
       case 'ftmo-results':           return await handleFtmoResults(req, res)
+      case 'run-ai-review':          return await handleRunAiReview(req, res)
+      case 'ai-review-results':      return await handleAiReviewResults(req, res)
+      case 'recommendation-results': return await handleRecommendationResults(req, res)
       default:
         return res.status(400).json({
           success: false,
-          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results`,
+          error: `Missing or unknown action. Valid actions: candle-counts, ingest, seed-strategies, strategies, run-setup-detection, setup-counts, run-backtest, backtest-results, run-trade-analysis, trade-analysis-results, run-analytics, analytics-results, run-ftmo-evaluation, ftmo-results, run-ai-review, ai-review-results, recommendation-results`,
         })
     }
   } catch (err) {
@@ -674,6 +682,204 @@ async function handleFtmoResults(req: VercelRequest, res: VercelResponse) {
       createdAt:        r.createdAt,
       profitTarget:     (r.equityCurveJson as Record<string, unknown>)?.profitTarget ?? null,
       finalBalance:     (r.equityCurveJson as Record<string, unknown>)?.finalBalance ?? null,
+    })),
+  })
+}
+
+// ── POST run-ai-review ─────────────────────────────────────────────────────
+
+async function handleRunAiReview(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return res.status(400).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured' })
+
+  const { backtestRunId } = req.body ?? {}
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId is required' })
+
+  const run = await db.backtestRun.findUnique({ where: { id: String(backtestRunId) } })
+  if (!run) return res.status(400).json({ success: false, error: `backtestRunId ${backtestRunId} not found` })
+
+  // Require analytics summaries to exist
+  const rawSummaries = await db.analyticsSummary.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { summaryType: 'asc' },
+  })
+  if (rawSummaries.length === 0)
+    return res.status(400).json({ success: false, error: 'No analytics summaries found. Run action=run-analytics first.' })
+
+  // FTMO results for context (latest 4 = 2 runs × 2 targets)
+  const rawFtmo = await db.fundedAccountTest.findMany({
+    where:   { backtestRunId: run.id },
+    orderBy: { createdAt: 'desc' },
+    take:    4,
+  })
+
+  // Strategy version + settings
+  const sv = await db.strategyVersion.findUnique({ where: { id: run.strategyVersionId } })
+  if (!sv) return res.status(400).json({ success: false, error: 'Strategy version not found' })
+  const settings = sv.settingsJson as unknown as CrossfireSettings
+
+  const ftmoResults: FtmoInput[] = rawFtmo.map(r => ({
+    profitTarget:     (r.equityCurveJson as Record<string, unknown>)?.profitTarget as number | null ?? null,
+    passed:           r.passed,
+    peakBalance:      r.peakBalance,
+    worstDrawdown:    r.worstDrawdown,
+    dailyBreachCount: r.dailyBreachCount,
+    failureReason:    r.failureReason,
+    finalBalance:     (r.equityCurveJson as Record<string, unknown>)?.finalBalance as number | null ?? null,
+  }))
+
+  const prompt = buildPrompt({
+    backtestRunId:         run.id,
+    strategyVersionNumber: sv.versionNumber,
+    settings,
+    summaries:             rawSummaries.map(s => ({ summaryType: s.summaryType, summaryJson: s.summaryJson })),
+    ftmoResults,
+  })
+
+  // Call Anthropic API (non-streaming — we need to parse the full response)
+  const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+      'Content-Type':      'application/json',
+    },
+    body: JSON.stringify({
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages:   [{ role: 'user', content: prompt }],
+    }),
+  })
+
+  if (!aiRes.ok) {
+    const errText = await aiRes.text()
+    return res.status(500).json({ success: false, error: `Anthropic API error ${aiRes.status}: ${errText.slice(0, 300)}` })
+  }
+
+  const aiData = await aiRes.json() as {
+    content?: { type: string; text: string }[]
+    usage?:   { input_tokens: number; output_tokens: number }
+    model?:   string
+  }
+
+  const responseText = aiData.content?.[0]?.text ?? ''
+  const tokenCount   = (aiData.usage?.input_tokens ?? 0) + (aiData.usage?.output_tokens ?? 0)
+  const modelUsed    = aiData.model ?? 'claude-haiku-4-5-20251001'
+
+  const parsed = parseRecommendations(responseText)
+
+  // Persist the review row (even if recommendations parsing failed — raw response is preserved)
+  const review = await db.aiReview.create({
+    data: {
+      backtestRunId:       run.id,
+      aiModel:             modelUsed,
+      prompt,
+      response:            responseText,
+      recommendationsJson: parsed.length > 0 ? parsed as object[] : undefined,
+      tokenCount,
+    },
+  })
+
+  // Create one StrategyRecommendation row per parsed recommendation
+  // proposedSettingsJson = full merged settings (current + delta) for human review
+  let recCount = 0
+  for (const rec of parsed) {
+    const proposedSettings = { ...settings, ...rec.proposedSettingChange }
+    await db.strategyRecommendation.create({
+      data: {
+        aiReviewId:          review.id,
+        strategyVersionId:   sv.id,
+        proposedSettingsJson: proposedSettings as object,
+        rationale:           `${rec.filter}\n\n${rec.rationale}\n\nOverfitting risk: ${rec.overfittingRisk}`,
+        expectedBenefit:     rec.expectedBenefit,
+        status:              'suggested',
+      },
+    })
+    recCount++
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      reviewId:            review.id,
+      backtestRunId:       run.id,
+      modelUsed,
+      tokenCount,
+      recommendationCount: recCount,
+      parsedSuccessfully:  parsed.length > 0,
+    },
+  })
+}
+
+// ── GET ai-review-results ──────────────────────────────────────────────────
+
+async function handleAiReviewResults(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  if (!backtestRunId) return res.status(400).json({ success: false, error: 'backtestRunId query param is required' })
+
+  const rows = await db.aiReview.findMany({
+    where:   { backtestRunId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id:                  true,
+      aiModel:             true,
+      tokenCount:          true,
+      recommendationsJson: true,
+      createdAt:           true,
+      _count:              { select: { recommendations: true } },
+    },
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: rows.map(r => ({
+      id:                  r.id,
+      aiModel:             r.aiModel,
+      tokenCount:          r.tokenCount,
+      recommendationCount: r._count.recommendations,
+      recommendationsJson: r.recommendationsJson,
+      createdAt:           r.createdAt,
+    })),
+  })
+}
+
+// ── GET recommendation-results ─────────────────────────────────────────────
+
+async function handleRecommendationResults(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const backtestRunId = req.query.backtestRunId ? String(req.query.backtestRunId) : undefined
+  const status        = req.query.status        ? String(req.query.status)        : undefined
+
+  const where: Record<string, unknown> = {}
+  if (backtestRunId) where.aiReview = { backtestRunId }
+  if (status)        where.status   = status
+
+  const rows = await db.strategyRecommendation.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take:    50,
+    include: {
+      aiReview: { select: { id: true, backtestRunId: true, aiModel: true, createdAt: true } },
+    },
+  })
+
+  return res.status(200).json({
+    success: true,
+    data: rows.map(r => ({
+      id:                  r.id,
+      aiReviewId:          r.aiReviewId,
+      backtestRunId:       r.aiReview.backtestRunId,
+      strategyVersionId:   r.strategyVersionId,
+      rationale:           r.rationale,
+      expectedBenefit:     r.expectedBenefit,
+      proposedSettingsJson: r.proposedSettingsJson,
+      status:              r.status,
+      createdAt:           r.createdAt,
     })),
   })
 }

@@ -19,9 +19,9 @@ Prerequisite reading: `trading_robot_rebuild_plan.md` (goals and requirements), 
 | 5 | Crossfire Setup Engine | ✅ Complete |
 | 6 | Signal Detection + Trade Simulation | ✅ Complete |
 | 7 | MFE and MAE Tracking | ✅ Complete |
-| 8 | Analytics Engine + FTMO Simulation | ⏳ In Progress |
-| 9 | Chart + Trade Review Integration | ⏳ Not Started |
-| 10 | AI Research Layer | ⏳ Not Started |
+| 8 | Analytics Engine + FTMO Simulation | ✅ Complete |
+| 9 | Chart + Trade Review Integration | ⏸ Deferred (skipped — see note) |
+| 10 | AI Research Layer | ⏳ In Progress |
 
 ---
 
@@ -966,7 +966,7 @@ milestone before stopping out?
 
 ---
 
-## Stage 8: Analytics Engine and FTMO Simulation ⏳ IN PROGRESS
+## Stage 8: Analytics Engine and FTMO Simulation ✅ COMPLETE
 
 ### Architecture Note (deviation from original plan)
 Same as Stage 7 — all server-side code lives in `api/_lib/` (not `trading-research/src/lib/`).
@@ -1095,7 +1095,11 @@ All analytics computable without modifying the trade simulation or strategy sett
 
 ---
 
-## Stage 9: Chart and Trade Review Integration ⏳ NOT STARTED
+## Stage 9: Chart and Trade Review Integration ⏸ DEFERRED
+
+> **Note:** Stage 9 (Chart DB integration) was skipped in favour of Stage 10 (AI Research Layer).
+> The chart continues to work via live OANDA candle fetch. This stage can be revisited later.
+> Original plan details are preserved below for reference.
 
 ### Objective
 Connect the chart to the database. The chart page accepts a `?backtestRunId` query parameter.
@@ -1171,98 +1175,91 @@ trade by trade. The chart component is unchanged — only its data source change
 
 ---
 
-## Stage 10: AI Research Layer ⏳ NOT STARTED
+## Stage 10: AI Research Layer ⏳ IN PROGRESS
+
+> **User-facing label:** This is "Stage 9" in the user's sequential numbering (Stage 9 chart
+> integration was deferred). The original plan's Stage 10 numbering is kept here for consistency.
+
+### Architecture Note (deviation from original plan)
+Same as previous stages — code lives in `api/_lib/` and admin endpoints are in `api/admin.ts`.
+No frontend research dashboard is built in this stage. The Anthropic API is called directly
+from the admin handler (non-streaming), not via the existing `api/ai.ts` SSE proxy.
 
 ### Objective
-Feed `analytics_summaries` (not raw candles) to Claude. Store every prompt, response, and
-structured recommendation. Add a simple approval workflow: AI suggests, human approves,
-approved suggestions create a new `strategy_version` row. AI cannot directly modify any
-live strategy setting.
+Send compact `analytics_summaries` (not raw candle data) to Claude. Store every prompt,
+response, and structured recommendation. Recommendations are saved with `status = 'suggested'`
+only. No auto-approval, no auto-strategy-version-creation. AI governance is strictly enforced.
+
+### Governance (hard-coded, never bypassed)
+- AI response is stored; never auto-applied to strategy settings.
+- All `strategy_recommendations` rows created with `status = 'suggested'`.
+- No `run-ai-review` call can modify `strategy_versions` — only human approval does that.
+- Prompt includes explicit guardrails against claiming certainty from small samples.
 
 ### Files Affected
 ```
-trading-research/
-  src/
-    lib/
-      ai-research.ts                   [NEW — buildAnalyticsPrompt(), parseRecommendations()]
-    app/
-      api/
-        ai-review/
-          route.ts                     [POST: trigger AI review for a backtest run]
-        recommendations/
-          [id]/
-            approve/
-              route.ts                 [POST: approve → creates new strategy_version]
-            reject/
-              route.ts                 [POST: reject with optional notes]
-      research/
-        page.tsx                       [NEW — AI research dashboard]
+api/
+  _lib/
+    ai-research.ts     [NEW — buildPrompt(), parseRecommendations()]
+  admin.ts             [UPDATED — add run-ai-review, ai-review-results, recommendation-results]
 ```
 
 ### Database Changes
 Populates `ai_reviews` and `strategy_recommendations`. No schema changes.
 
+### Schema Notes
+- `AiReview.prompt` / `.response` — non-nullable Strings. Only create the row on API success.
+- `StrategyRecommendation.strategyVersionId` — required FK. Sourced from `BacktestRun.strategyVersionId`.
+- `StrategyRecommendation.proposedSettingsJson` — stores the FULL merged settings object
+  (current settings + AI delta), not just the delta. Server-side merge.
+- `AiReview` has no unique constraint — multiple reviews per run are permitted (audit trail).
+
+### Admin Endpoints
+```
+POST /api/admin?action=run-ai-review        { backtestRunId }
+  Requires analytics_summaries to exist (run action=run-analytics first).
+  Calls Anthropic claude-haiku-4-5-20251001, max_tokens=1024.
+  Creates 1 AiReview row + up to 5 StrategyRecommendation rows (status=suggested).
+
+GET  /api/admin?action=ai-review-results    ?backtestRunId=xxx
+  Returns all AiReview rows for the run.
+
+GET  /api/admin?action=recommendation-results  ?backtestRunId=xxx [&status=suggested]
+  Returns StrategyRecommendation rows with joined review metadata.
+```
+
 ### Dependencies
-- Stage 8 complete (`analytics_summaries` populated)
-- ANTHROPIC_API_KEY configured
+- Stage 8 complete (`analytics_summaries` populated for the target backtestRunId)
+- `ANTHROPIC_API_KEY` set in Vercel environment variables
 
-### Implementation Detail
+### Prompt Design (target: under 1,500 tokens)
+Includes: overall stats, path analysis milestones, day-of-week breakdown, session hour,
+breakout type, FTMO simulation results, compact current settings.
 
-**`lib/ai-research.ts`**:
-```typescript
-export function buildAnalyticsPrompt(
-  summaries: AnalyticsSummary[],
-  strategyVersion: StrategyVersion
-): string
-```
+Guardrails in prompt:
+- Suggest testable hypotheses only — do not recommend live trading
+- Flag any finding with n < 30 trades as low-confidence
+- Do not claim certainty from small samples
+- Each filter must be verifiable on a separate dataset
+- You cannot change strategy settings — only humans can approve changes
 
-Prompt format (target: under 2,000 tokens):
-```
-You are reviewing backtest results for the Crossfire trading strategy (version [n]).
-
-Overall: [win_rate]% win rate, [n] trades, expectancy [x]R, max drawdown [x]%
-
-Day of week:  Mon [x]% (n=[n]) | Tue [x]% | Wed [x]% | Thu [x]% | Fri [x]%
-Breakout type: strong_body [x]% (n=[n]) | weak_body [x]% | wick [x]%
-MFE: [x]% of all trades reach 1R before stopping. Break-even at 1R would save [x]% of losses.
-
-Current settings: [compact settings_json]
-
-Identify up to 5 testable filters that could improve robustness. Avoid filters with n < 30.
-Return a JSON array: [{ filter, rationale, proposed_setting_change, expected_benefit, overfitting_risk }]
-```
-
-**Governance (hard-coded, never bypassed):**
-- AI response is stored; never auto-applied.
-- All recommendations created with `status = 'suggested'`.
-- `/api/recommendations/[id]/approve` calls `createStrategyVersion()` with proposed settings,
-  sets recommendation `status = 'accepted'`. Original version is unchanged.
-- `/api/recommendations/[id]/reject` sets `status = 'rejected'` with notes.
-
-**Research dashboard** shows:
-- AI reviews list with expandable prompt/response.
-- Recommendations table: description, status badge, proposed settings.
-- Approve/Reject buttons with confirmation.
-- Side-by-side diff: current settings_json vs proposed settings_json.
+Output format: JSON array only. Up to 5 elements:
+`[{ "filter", "rationale", "proposedSettingChange": {delta only}, "expectedBenefit", "overfittingRisk" }]`
 
 ### Validation Criteria
-1. Trigger AI review for 2024 EUR_USD backtest. `ai_reviews` row created with non-null
-   `ai_response` and valid `recommendations_json` array.
-2. `strategy_recommendations` rows created (expect 3–5 per review).
-3. Approve one recommendation → new `strategy_versions` row with `version_number: 2` and
-   the proposed settings. Original v1 row unchanged and still readable.
-4. The new v2 can be passed to `runBacktest()` (Stage 6) as its `strategyVersionId`.
-5. Confirm the approve route does not UPDATE any existing `strategy_versions` row.
-6. Reject a recommendation → `status = 'rejected'`. Rejected recommendations are queryable
-   (permanent record to avoid re-testing the same idea).
+1. Run `run-ai-review` for a known backtestRunId. Response: `{ reviewId, recommendationCount, tokenCount }`.
+2. `ai-review-results?backtestRunId=xxx` returns ≥ 1 row with non-null `recommendationsJson`.
+3. `recommendation-results?backtestRunId=xxx` returns rows all with `status = "suggested"`.
+4. No `strategy_versions` row was created or modified by the review.
+5. Re-running `run-ai-review` creates a new row (not an upsert) — both reviews are preserved.
 
 ### Risks
-- **Recommendation quality.** Claude may suggest filters based on very small sample sizes.
-  The prompt instructs "avoid filters with n < 30" but this must also be enforced in
-  `parseRecommendations()` — reject any recommendation where the underlying segment has
-  fewer than 30 trades.
-- **Cost.** Each review ≈ 2,000 prompt tokens + 500 response tokens. At current pricing
-  this is under $0.10 per review. Manual trigger only — no automatic reviews.
+- **Small sample disclaimer.** With n=3 test trades, the AI will (and should) flag every
+  recommendation as low-confidence. The guardrails ensure this is surfaced, not hidden.
+- **JSON parse failure.** If Claude doesn't return a valid JSON array, the review row is still
+  saved with `recommendationsJson = null` and 0 recommendations. The raw response is preserved.
+- **Cost.** Each review ≈ 1,200 prompt tokens + 600 response tokens ≈ $0.01 with Haiku.
+  Manual trigger only — no automatic reviews.
 
 ### Expected Outcome
 Claude reviews analytics summaries, not raw candle data. All prompts, responses, and
